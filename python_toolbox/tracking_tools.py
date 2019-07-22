@@ -133,3 +133,73 @@ def subsegment_object(obj):
     BTma.mask = np.logical_not(obj['feature_mask'])
     segment_labels = subsegment(BTma)
     return segment_labels
+
+def recursive_linker(links_list1=None, links_list2=None, label_list1=None, label_list2=None, overlap_list1=None, overlap_list2=None):
+    recursive = False
+    if links_list1 is None:
+        links_list1=[]
+    if links_list2 is None:
+        links_list2=[]
+    if label_list1 is None:
+        label_list1=[]
+    if label_list2 is None:
+        label_list2=[]
+    if overlap_list1 is None:
+        overlap_list1=[]
+    if overlap_list2 is None:
+        overlap_list2=[]
+    for i in links_list1:
+        if i in label_list1:
+            loc = label_list1.index(i)
+            label = label_list1.pop(loc)
+            overlap = overlap_list1.pop(loc)
+            for j in overlap:
+                if j not in links_list2:
+                    links_list2.append(j)
+                    recursive = True
+    if recursive:
+        links_list2, links_list1 = recursive_linker(links_list1=links_list2, links_list2=links_list1, label_list1=label_list2, label_list2=label_list1, overlap_list1=overlap_list2, overlap_list2=overlap_list1)
+    return links_list1, links_list2
+
+def link_labels(labels1, labels2):
+    overlap_mask = np.logical_and((labels1>0),(labels2>0))
+    labels_masked1 = labels1[overlap_mask]
+    labels_masked2 = labels2[overlap_mask]
+    label_list1 = np.unique(labels_masked1).tolist()
+    label_list2 = np.unique(labels_masked2).tolist()
+    overlap_list1 = [np.unique(labels_masked2[labels_masked1==label]).tolist() for label in label_list1]
+    overlap_list2 = [np.unique(labels_masked1[labels_masked2==label]).tolist() for label in label_list2]
+    links_list1 = []
+    links_list2 = []
+    while len(label_list1)>0:
+        temp_links1, temp_links2 = recursive_linker([label_list1[0]], label_list1=label_list1, label_list2=label_list2, overlap_list1=overlap_list1, overlap_list2=overlap_list2)
+        links_list1.append(temp_links1)
+        links_list2.append(temp_links2)
+    return links_list1, links_list2
+
+def optical_flow_track(frame0, frame1, frame0_features, frame1_features):
+    u,v = get_flow(frame0, frame1)
+    u,v = np.rint(u), np.rint(v)
+    frame0_labels = label_features(frame0_features>0)[0]
+    frame1_labels = label_features(frame1_features>0)[0]
+    y,x=np.where(frame0_labels>0)
+    y_new = np.minimum(np.maximum(y+v[frame0_labels>0],0),1499).astype('int')
+    x_new = np.minimum(np.maximum(x+u[frame0_labels>0],0),2499).astype('int')
+    new_frame_labels = np.zeros_like(frame0_labels)
+    new_frame_labels[y_new, x_new] = frame0_labels[y,x]
+    new_frame_labels = grey_closing(new_frame_labels, size=(3,3))
+    flow_links = link_labels(new_frame_labels, frame1_labels)
+    flow_links = zip(*flow_links)
+    linked_labels = np.zeros((2,)+frame0_labels.shape)
+    for i, links in enumerate(flow_links):
+        linked_labels[0][np.any(frame0_labels[...,np.newaxis] == links[0], axis=-1)] = i+1
+        linked_labels[1][np.any(frame1_labels[...,np.newaxis] == links[1], axis=-1)] = i+1
+    overlap_proportion = [np.sum(np.logical_and(
+        np.any(new_frame_labels[...,np.newaxis] == links[0], axis=-1),
+        np.any(frame1_labels[...,np.newaxis] == links[1], axis=-1)))/
+        np.sum(np.any(new_frame_labels[...,np.newaxis] == links[0], axis=-1)) for links in flow_links]
+    return linked_labels, overlap_proportion
+
+def get_flow(frame0, frame1):
+    flow = cv.calcOpticalFlowFarneback(ds_to_8bit(frame0).data.compute(),ds_to_8bit(frame1).data.compute(), None, 0.5, 3, 4, 3, 5, 1.2, 0)
+    return flow[...,0], flow[...,1]
