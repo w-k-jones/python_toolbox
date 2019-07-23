@@ -2,7 +2,7 @@ import numpy as np
 from numpy import ma
 import xarray as xr
 from datetime import datetime, timedelta
-from scipy.ndimage import label
+from scipy.ndimage import label as label_features
 from scipy.signal import convolve
 from skimage.morphology import watershed
 from skimage.feature import peak_local_max
@@ -10,6 +10,7 @@ from skimage.morphology import local_minima, h_minima, selem, star, ball, waters
 from scipy.ndimage.filters import gaussian_filter
 from scipy.ndimage.morphology import grey_erosion, grey_dilation, grey_opening, grey_closing, binary_opening, binary_dilation
 import pandas as pd
+import cv2 as cv
 
 
 def constrain_thresholds(data, upper_thresh=np.inf, lower_thresh=-np.inf):
@@ -176,6 +177,10 @@ def link_labels(labels1, labels2):
         links_list1.append(temp_links1)
         links_list2.append(temp_links2)
     return links_list1, links_list2
+
+def ds_to_8bit(ds):
+    ds_out = (ds-ds.min())*255/(ds.max()-ds.min())
+    return ds_out.astype('uint8')
 
 def optical_flow_track(frame0, frame1, frame0_features, frame1_features):
     u,v = get_flow(frame0, frame1)
