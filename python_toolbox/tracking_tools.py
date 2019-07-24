@@ -8,9 +8,10 @@ from skimage.morphology import watershed
 from skimage.feature import peak_local_max
 from skimage.morphology import local_minima, h_minima, selem, star, ball, watershed
 from scipy.ndimage.filters import gaussian_filter
-from scipy.ndimage.morphology import grey_erosion, grey_dilation, grey_opening, grey_closing, binary_opening, binary_dilation
+from scipy.ndimage.morphology import grey_erosion, grey_dilation, grey_opening, grey_closing, binary_opening, binary_dilation, binary_erosion
 import pandas as pd
 import cv2 as cv
+from .abi_tools import get_abi_IR
 
 
 def constrain_thresholds(data, upper_thresh=np.inf, lower_thresh=-np.inf):
@@ -115,10 +116,15 @@ def get_object_info(object_slice, files_list, feature_mask, lats, lons, pixel_ar
     object_info['growth_rate'] = [(object_info['area'][i]-object_info['area'][i-1])/object_info['timedeltas'][i-1] for i in range(1, len(object_info['files']))]
     return object_info
 
-def subsegment(bt, h_level=2.5, min_separation=2):
+def subsegment(bt, h_level=2.5, min_separation=2, sigma=0.5, BT_thresh=240):
     bt.fill_value = bt.max()
-    peaks = np.all((h_minima(gaussian_filter(bt.filled(),0.5),h_level),local_minima(gaussian_filter(bt.filled(),0.5),connectivity=min_separation),bt.filled()<240), axis=0)
-    segments = watershed(bt.filled(),label_features(peaks)[0], mask=np.logical_not(bt.mask))
+    peaks = np.all((h_minima(gaussian_filter(bt.filled(),sigma),h_level),local_minima(gaussian_filter(bt.filled(),sigma),connectivity=min_separation),bt.filled()<BT_thresh), axis=0)
+    eroded_mask = binary_erosion(bt.mask, structure=(np.ones((1,3,3))))
+    segments = watershed(bt.filled(),label_features(peaks)[0], mask=np.logical_not(eroded_mask))
+    dilated_segments = grey_dilation(segments, structure=np.ones((3,3,3)))
+    segments[segments==0] = dilated_segments[segments==0]
+    segments = ma.array(segments, mask = bt.mask)
+    segments.fill_value = 0
     return segments
 
 def get_central_xy(obj):
@@ -127,12 +133,12 @@ def get_central_xy(obj):
     central_y = ma.array(np.stack([yy]*obj['feature_mask'].shape[0]),mask=np.logical_not(obj['feature_mask'])).mean(axis=(1,2)).data
     return central_x, central_y
 
-def subsegment_object(obj):
-    c13_ds = xr.open_mfdataset([f[13] for f in obj['files']], concat_dim='t')
+def subsegment_object(obj, **kwargs):
+    c13_ds = xr.open_mfdataset([f[13] for f in obj['files']], combine='nested', concat_dim='t')
     BT = get_abi_IR(c13_ds[{'y':obj['slice'][0], 'x':obj['slice'][1]}]).compute()
     BTma = BT.to_masked_array()
     BTma.mask = np.logical_not(obj['feature_mask'])
-    segment_labels = subsegment(BTma)
+    segment_labels = subsegment(BTma, **kwargs)
     return segment_labels
 
 def recursive_linker(links_list1=None, links_list2=None, label_list1=None, label_list2=None, overlap_list1=None, overlap_list2=None):
@@ -182,28 +188,30 @@ def ds_to_8bit(ds):
     ds_out = (ds-ds.min())*255/(ds.max()-ds.min())
     return ds_out.astype('uint8')
 
-def optical_flow_track(frame0, frame1, frame0_features, frame1_features):
+def optical_flow_track(frame0, frame1, frame0_labels, frame1_labels):
     u,v = get_flow(frame0, frame1)
     u,v = np.rint(u), np.rint(v)
-    frame0_labels = label_features(frame0_features>0)[0]
-    frame1_labels = label_features(frame1_features>0)[0]
     y,x=np.where(frame0_labels>0)
     y_new = np.minimum(np.maximum(y+v[frame0_labels>0],0),1499).astype('int')
     x_new = np.minimum(np.maximum(x+u[frame0_labels>0],0),2499).astype('int')
     new_frame_labels = np.zeros_like(frame0_labels)
     new_frame_labels[y_new, x_new] = frame0_labels[y,x]
-    new_frame_labels = grey_closing(new_frame_labels, size=(3,3))
+    new_frame_labels = grey_closing(new_frame_labels, size=(3,3)).astype('int')
     flow_links = link_labels(new_frame_labels, frame1_labels)
     flow_links = zip(*flow_links)
-    linked_labels = np.zeros((2,)+frame0_labels.shape)
-    for i, links in enumerate(flow_links):
-        linked_labels[0][np.any(frame0_labels[...,np.newaxis] == links[0], axis=-1)] = i+1
-        linked_labels[1][np.any(frame1_labels[...,np.newaxis] == links[1], axis=-1)] = i+1
-    overlap_proportion = [np.sum(np.logical_and(
-        np.any(new_frame_labels[...,np.newaxis] == links[0], axis=-1),
-        np.any(frame1_labels[...,np.newaxis] == links[1], axis=-1)))/
-        np.sum(np.any(new_frame_labels[...,np.newaxis] == links[0], axis=-1)) for links in flow_links]
-    return linked_labels, overlap_proportion
+    linked_labels = np.stack([frame0_labels, frame1_labels])
+    for links in flow_links:
+        linked_labels[0][np.any(frame0_labels[...,np.newaxis] == links[0], axis=-1)] = links[0][0]
+        linked_labels[1][np.any(frame1_labels[...,np.newaxis] == links[1], axis=-1)] = links[0][0]
+    missed_labels = np.unique(np.stack([frame0_labels,frame1_labels])[np.logical_and(np.stack([frame0_labels,frame1_labels])>0,linked_labels==0)])
+    if missed_labels.size > 0:
+        raise Exception("Labels missed")
+    # Have removed overlap proportion for now, will need to look into improving the method
+    # overlap_proportion = [np.sum(np.logical_and(
+    #     np.any(new_frame_labels[...,np.newaxis] == links[0], axis=-1),
+    #     np.any(frame1_labels[...,np.newaxis] == links[1], axis=-1)))/
+    #     np.sum(np.any(new_frame_labels[...,np.newaxis] == links[0], axis=-1)) for links in flow_links]
+    return linked_labels#, overlap_proportion
 
 def get_flow(frame0, frame1):
     flow = cv.calcOpticalFlowFarneback(ds_to_8bit(frame0).data.compute(),ds_to_8bit(frame1).data.compute(), None, 0.5, 3, 4, 3, 5, 1.2, 0)
