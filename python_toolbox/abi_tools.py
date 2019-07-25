@@ -100,7 +100,57 @@ def get_abi_IR(dataset, check=False):
         bt[DQF>1] = np.nan
     return bt
 
+def get_abi_ds_from_files(filenames, check=False):
+    if type(filenames) is str:
+        with xr.open_dataset(filenames) as ds:
+            channel = ds.band_id.data[0]
+            wavelength = ds.band_wavelength.data[0]
+            if channel<7:
+                return get_abi_ref(ds)
+            else:
+                return get_abi_IR(ds)
+    elif hasattr(filenames, '__iter__'):
+        with xr.open_mfdataset(filenames, combine='nested', concat_dim='t') as ds:
+            channel = ds.band_id.data[0].compute()
+            wavelength = ds.band_wavelength.data[0].compute()
+            if channel<7:
+                return get_abi_ref(ds)
+            else:
+                return get_abi_IR(ds)
+    else:
+        raise ValueError("""Error in 'get_abi_ds_from_files: filenames input must be either a string
+                            or a list of strings'""")
+
+def plot_goes_file(filename):
+    date = get_abi_date_from_filename(filename)
+    with xr.open_dataset(filename) as ds:
+        channel = ds.band_id.data[0]
+        wavelength = ds.band_wavelength.data[0]
+        if channel<7:
+            data = get_abi_ref(ds)
+            vmin = 0
+            vmax = 1
+            cmap = 'viridis'
+        else:
+            data = get_abi_IR(ds)
+            vmin= 180
+            vmax=320
+            cmap='inferno'
+        m = get_abi_basemap(ds)
+    m.drawcoastlines()
+    m.drawparallels(np.arange(20.,51,10.),labels=[False,True,False,False])
+    m.drawmeridians(np.arange(180.,351,10.),labels=[False,False,False,True])
+    m.imshow(data[::-1], vmin=vmin, vmax=vmax, cmap=cmap)
+    m.colorbar()
+    plt.title('GOES-16 Channel '+str(channel)+': '+str(wavelength)+' micron', fontweight='semibold', fontsize=15)
+    plt.title('%s' % date.strftime('%d %B %Y'), loc='right')
+    return
+
 def get_abi_BT_from_files(filenames, check=False):
+    """
+    This function is being depreciated, using xr.open_mfdataset is much better.
+    See function "get_abi_ds_from_files"
+    """
     if type(filenames) is str:
         with xr.open_dataset(filenames) as ds:
             return(get_abi_IR(ds))

@@ -23,13 +23,19 @@ def mark_thresholds(data, upper_thresh=np.inf, lower_thresh=-np.inf, mask=None):
         marker *= mask
     return markers
 
+def get_sobel_matrix(ndims):
+    sobel_matrix = np.array([-1,0,1])
+    for i in range(ndims-1):
+        sobel_matrix = np.multiply.outer(np.array([1,2,1]), sobel_matrix)
+    return sobel_matrix
+
 def convolve_grad(input_matrix, sobel_matrix):
     output_matrix = np.zeros(input_matrix.shape)
     for i in range(np.product(sobel_matrix.shape)):
         if sobel_matrix.ravel()[i] != 0:
             loc = tuple([slice([0,1][ind<1], [None,-1][ind>1]) for ind in np.unravel_index(i, sobel_matrix.shape)])
             offset_loc = tuple([slice([0,1][ind>1], [None,-1][ind<1]) for ind in np.unravel_index(i, sobel_matrix.shape)])
-            output_matrix[loc] += (input_matrix[offset_loc] - input_matrix[offset_loc]) * sobel_matrix.ravel()[i]
+            output_matrix[loc] += (input_matrix[offset_loc] - input_matrix[loc]) * sobel_matrix.ravel()[i]
     return output_matrix
 
 # Faster 'convolution' function to find the gradient for the sobel case -- uphill only version
