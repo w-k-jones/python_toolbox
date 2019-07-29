@@ -9,6 +9,8 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.basemap import Basemap
 from pyproj import Proj
 import cv2 as cv
+from dateutil.parser import parse as parse_date
+from .dataset_tools import get_ds_area_mean, match_coords
 
 def get_goes_abi_files(input_file):
     # Returns a list of the datetime and all 16 channel file names for ABI lvl1 data from the path of the name of one file
@@ -24,7 +26,7 @@ def get_goes_abi_files(input_file):
 
 def get_abi_date_from_filename(filename):
     base_string = filename.split('/')[-1].split('_s')[-1]
-    date = parse_date(base_string[:4]+'0101'+base_string[7:13]) + timedelta(days=int(base_string[4:7]))
+    date = parse_date(base_string[:4]+'0101'+base_string[7:13]) + timedelta(days=int(base_string[4:7])-1)
     return date
 
 def get_abi_basemap(ds):
