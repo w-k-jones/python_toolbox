@@ -100,6 +100,25 @@ def uphill_sobel(input_matrix, downhill=False, uphill_positive=False, use_convol
     output_matrix = np.sum(output_matrix**2,0)**0.5
     return output_matrix
 
+def get_markers(field_in, upper_thresh=None, lower_thresh=None, mask=None):
+    if lower_thresh is not None:
+        markers = field_in < lower_thresh
+        upper_marker = 2
+    else:
+        upper_marker = 1
+    if upper_thresh is not None:
+        if upper_marker == 2:
+            markers = np.maximum(2 * (field_in > upper_thresh), markers)
+        else:
+            markers = field_in > upper_thresh
+    elif upper_marker == 1:
+        raise ValueError("""Error in get_markers: Atleast one of keywords upper_thresh,
+                            lower_thresh must be supplied""")
+    if mask is not None:
+        markers *= mask
+
+    return markers
+
 def get_object_info(object_slice, files_list, feature_mask, lats, lons, pixel_area, label=True):
     object_info={}
     object_info['files']=files_list[object_slice[0]]

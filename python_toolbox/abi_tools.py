@@ -185,8 +185,12 @@ def get_abi_rgb(C01_ds, C02_ds, C03_ds, IR_ds=None, gamma=0.4, contrast=75, l=1)
         l = l*2
     l = int(l)
     R = get_ds_area_mean(get_abi_ref(C02_ds), l*2)
-    G = get_ds_area_mean(get_abi_ref(C03_ds), l)
-    B = get_ds_area_mean(get_abi_ref(C01_ds), l)
+    if l > 1:
+        G = get_ds_area_mean(get_abi_ref(C03_ds), l)
+        B = get_ds_area_mean(get_abi_ref(C01_ds), l)
+    else:
+        G = get_abi_ref(C03_ds)
+        B = get_abi_ref(C01_ds)
     match_coords([R,G,B], 'x')
     match_coords([R,G,B], 'y')
     match_coords([R,G,B], 't')
@@ -203,12 +207,18 @@ def get_abi_rgb(C01_ds, C02_ds, C03_ds, IR_ds=None, gamma=0.4, contrast=75, l=1)
     G_true = np.maximum(G_true, 0)
     G_true = np.minimum(G_true, 1)
     if IR_ds is not None:
-        IR = get_ds_area_mean(get_abi_IR(IR_ds), l//2)
+        if l//2 > 1:
+            IR = get_ds_area_mean(get_abi_IR(IR_ds), l//2)
+        else:
+            IR = get_abi_IR(IR_ds)
+        match_coords([R,IR], 'x')
+        match_coords([R,IR], 'y')
+        match_coords([R,IR], 't')
         IR = np.maximum(IR, 90)
         IR = np.minimum(IR, 313)
         IR = (IR-90)/(313-90)
         IR = (1 - IR.data)/1.5
-        RGB = _contrast_correction(np.dstack([np.maximum(R.data, IR), np.maximum(G_true, IR), np.maximum(B.data, IR)]), contrast=contrast)
+        RGB = _contrast_correction(np.dstack([np.maximum(R, IR), np.maximum(G_true, IR), np.maximum(B, IR)]), contrast=contrast)
     else:
         RGB = _contrast_correction(np.dstack([R, G_true, B]), contrast=contrast)
 
