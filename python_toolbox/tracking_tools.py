@@ -2,6 +2,7 @@ import numpy as np
 from numpy import ma
 import xarray as xr
 from datetime import datetime, timedelta
+from scipy import interpolate
 from scipy.ndimage import label as label_features
 from scipy.signal import convolve
 from skimage.morphology import watershed
@@ -11,7 +12,7 @@ from scipy.ndimage.filters import gaussian_filter
 from scipy.ndimage.morphology import grey_erosion, grey_dilation, grey_opening, grey_closing, binary_opening, binary_dilation, binary_erosion
 import pandas as pd
 import cv2 as cv
-from .abi_tools import get_abi_IR
+from .abi_tools import get_abi_IR, get_abi_ref
 
 
 def constrain_thresholds(data, upper_thresh=np.inf, lower_thresh=-np.inf):
@@ -69,7 +70,7 @@ def sobel(input_matrix, use_convolve=False):
     return output_matrix
 
 # 'Uphill only' sobel operation. Finds only uphill slopes, to avoid masking smaller cloud objects
-def uphill_sobel(input_matrix, downhill=False, uphill_positive=False, use_convolve=False):
+def uphill_sobel(input_matrix, downhill=False, uphill_positive=False, use_convolve=False, axis=None):
     ndims = len(input_matrix.shape)
     sobel_matrix = get_sobel_matrix(ndims)
     if uphill_positive:
@@ -95,9 +96,14 @@ def uphill_sobel(input_matrix, downhill=False, uphill_positive=False, use_convol
                 for j in range(ndims):
                     output_matrix[j] += temp_matrix * np.rollaxis(sobel_matrix,j).ravel()[i]
     else:
-        for i in range(ndims):
-            output_matrix[i] = convolve_grad_uphill(input_matrix, np.rollaxis(sobel_matrix,i), downhill=downhill)
-    output_matrix = np.sum(output_matrix**2,0)**0.5
+        if axis is None:
+            for i in range(ndims):
+                output_matrix[i] = convolve_grad_uphill(input_matrix, np.rollaxis(sobel_matrix,i), downhill=downhill)
+            output_matrix = np.sum(output_matrix**2,0)**0.5
+        elif axis not in range(ndims):
+            raise ValueError('Axis value is '+str(axis)+' but input data only has '+str(ndims)+' dimensions')
+        else:
+            output_matrix = convolve_grad_uphill(input_matrix, np.rollaxis(sobel_matrix, axis), downhill=downhill)
     return output_matrix
 
 def get_markers(field_in, upper_thresh=None, lower_thresh=None, mask=None):
@@ -209,8 +215,12 @@ def link_labels(labels1, labels2):
         links_list2.append(temp_links2)
     return links_list1, links_list2
 
-def ds_to_8bit(ds):
-    ds_out = (ds-ds.min())*255/(ds.max()-ds.min())
+def ds_to_8bit(ds, vmin=None, vmax=None):
+    if vmin is None:
+        vmin= ds.min()
+    if vmax is None:
+        vmax= ds.max()
+    ds_out = (ds-vmin)*255/(vmax-vmin)
     return ds_out.astype('uint8')
 
 def optical_flow_track(frame0, frame1, frame0_labels, frame1_labels):
@@ -241,3 +251,120 @@ def optical_flow_track(frame0, frame1, frame0_labels, frame1_labels):
 def get_flow(frame0, frame1):
     flow = cv.calcOpticalFlowFarneback(ds_to_8bit(frame0).data.compute(),ds_to_8bit(frame1).data.compute(), None, 0.5, 3, 4, 3, 5, 1.2, 0)
     return flow[...,0], flow[...,1]
+
+def interp_flow(da, flow):
+    x = np.arange(da.coords['x'].size)
+    y = np.arange(da.coords['y'].size)
+    xx, yy = np.meshgrid(x, y)
+    new_xx, new_yy = xx + flow[...,0], yy + flow[...,1]
+    interp_da = xr.apply_ufunc(interpolate.interpn, (y, x), da, (new_yy, new_xx), kwargs={'method':'linear', 'bounds_error':False, 'fill_value':None})
+    return interp_da
+
+def get_diff_flow(frame0, frame1):
+    vmin = np.minimum(frame0.min(), frame1.min())
+    vmax = np.maximum(frame0.max(), frame1.max())
+    flow = cv.calcOpticalFlowFarneback(ds_to_8bit(frame0).data.compute(),#, vmin=vmin, vmax=vmax).data.compute(),
+                                       ds_to_8bit(frame1).data.compute(),#, vmin=vmin, vmax=vmax).data.compute(),
+                                       None, 0.5, 4, 8, 4, 5, 1.1, cv.OPTFLOW_FARNEBACK_GAUSSIAN)
+    interp_frame1 = interp_flow(frame1.compute(), flow)
+    return interp_frame1 - frame0
+
+def get_object_abi(obj, channel, expand=0):
+    x_slice = slice(obj['slice'][1].start-expand, obj['slice'][1].stop+expand)
+    y_slice = slice(obj['slice'][0].start-expand, obj['slice'][0].stop+expand)
+
+    with xr.open_mfdataset([f[channel] for f in obj['files']], combine='nested', concat_dim='t') as ds:
+        if channel > 6:
+            return get_abi_IR(ds[{'x':x_slice, 'y':y_slice}])
+        else:
+            return get_abi_ref(ds[{'x':x_slice, 'y':y_slice}])
+
+def get_ds_flow(da, direction='forwards', pyr_scale=0.5, levels=5, winsize=15, iterations=4, poly_n=5, poly_sigma=1.2, flags=cv.OPTFLOW_FARNEBACK_GAUSSIAN):
+    x_flow = xr.zeros_like(da).compute()*np.nan
+    y_flow = xr.zeros_like(da).compute()*np.nan
+    if direction == 'forwards':
+        frame1 = ds_to_8bit(da[0]).data.compute()
+        for i in range(1, da.coords['t'].size):
+            frame0, frame1 = frame1, ds_to_8bit(da[i]).data.compute()
+
+            flow = xr.apply_ufunc(cv.calcOpticalFlowFarneback, frame0, frame1,
+                                   None, pyr_scale, levels, winsize, iterations, poly_n, poly_sigma, flags)
+            x_flow[i-1], y_flow[i-1] = flow[...,0], flow[...,1]
+    elif direction == 'backwards':
+        frame1 = ds_to_8bit(da[-1]).data.compute()
+        for i in range(da.coords['t'].size-1, 0, -1):
+            frame0, frame1 = frame1, ds_to_8bit(da[i-1]).data.compute()
+
+            flow = xr.apply_ufunc(cv.calcOpticalFlowFarneback, frame0, frame1,
+                                   None, pyr_scale, levels, winsize, iterations, poly_n, poly_sigma, flags)
+            x_flow[i], y_flow[i] = flow[...,0], flow[...,1]
+    else:
+        raise ValueError("""keyword 'direction' only accepts 'forwards' or 'backwards' as acceptable values""")
+    return x_flow, y_flow
+
+def interp_ds_flow(da, x_flow, y_flow, direction='forwards'):
+    da_flow = xr.zeros_like(da).compute()*np.nan
+    if direction == 'forwards':
+        for i in range(da.coords['t'].size-1):
+            da_flow[i] = interp_flow(da[i+1].compute(), np.stack([x_flow[i], y_flow[i]], axis=-1))
+    elif direction == 'backwards':
+        for i in range(1,da.coords['t'].size):
+            da_flow[i] = interp_flow(da[i-1].compute(), np.stack([x_flow[i], y_flow[i]], axis=-1))
+    else:
+        raise ValueError("""keyword 'direction' only accepts 'forwards' or 'backwards' as acceptable values""")
+    return da_flow
+
+def get_growth_metric(da, x_flow, y_flow, direction='forwards'):
+    da_d2 = da.differentiate('x').differentiate('x') + da.differentiate('y').differentiate('y')
+    da_flow = interp_ds_flow(da, x_flow, y_flow, direction=direction)
+    if direction == 'forwards':
+        da_growth = np.maximum(-(da_flow - da) * da_d2/1e10, 0)
+    elif direction == 'backwards':
+        da_growth = np.maximum((da_flow - da) * da_d2/1e10, 0)
+    else:
+        raise ValueError("""keyword 'direction' only accepts 'forwards' or 'backwards' as acceptable values""")
+    return da_growth
+
+def expand_labels_optflow(labels, x_flow_forwards, y_flow_forwards,
+                          x_flow_backwards, y_flow_backwards,
+                          max_iter=100, mask=None):
+    z,y,x = (range(shape) for shape in labels.shape)
+    zzz, yyy, xxx = np.meshgrid(z,y,x, indexing='ij')
+    xxx_for = xxx + x_flow_forwards
+    yyy_for = yyy + y_flow_forwards
+    xxx_back = xxx + x_flow_backwards
+    yyy_back = yyy + y_flow_backwards
+    iter_labels = labels.copy()
+    old_sum = np.sum(iter_labels > 0)
+    for i in range(max_iter):
+        if mask is None:
+            wh_interp = iter_labels == 0
+        else:
+            wh_interp = np.logical_and(mask, iter_labels==0)
+        iter_labels[wh_interp] = interpolate.interpn((z,y,x),
+                                                     iter_labels,
+                                                    (zzz[wh_interp]+1,
+                                                     yyy_for.data[wh_interp],
+                                                     xxx_for.data[wh_interp]),
+                                                    method='nearest',
+                                                    bounds_error=False,
+                                                    fill_value=0)
+        if mask is None:
+            wh_interp = iter_labels == 0
+        else:
+            wh_interp = np.logical_and(mask, iter_labels==0)
+        iter_labels[wh_interp] = interpolate.interpn((z,y,x),
+                                                     iter_labels,
+                                                     (zzz[wh_interp]-1,
+                                                      yyy_back.data[wh_interp],
+                                                      xxx_back.data[wh_interp]),
+                                                     method='nearest',
+                                                     bounds_error=False,
+                                                     fill_value=0)
+        new_sum = np.sum(iter_labels>0)
+        print(new_sum)
+        if new_sum == old_sum:
+            break
+        old_sum = new_sum
+
+    return iter_labels

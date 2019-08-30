@@ -113,8 +113,8 @@ def get_abi_ds_from_files(filenames, check=False):
                 return get_abi_IR(ds)
     elif hasattr(filenames, '__iter__'):
         with xr.open_mfdataset(filenames, combine='nested', concat_dim='t') as ds:
-            channel = ds.band_id.data[0].compute()
-            wavelength = ds.band_wavelength.data[0].compute()
+            channel = ds.band_id.data[0]
+            wavelength = ds.band_wavelength.data[0]
             if channel<7:
                 return get_abi_ref(ds)
             else:
