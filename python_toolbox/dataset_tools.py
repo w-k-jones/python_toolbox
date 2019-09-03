@@ -12,43 +12,103 @@ def interp_ds_area(ds, l=1, axis=None):
     else:
         if not hasattr(axis, '__iter__'):
             axis = [axis]
-        interp_dims = {ds.dims[i]:ds[ds.dims[i]].data[:ds[ds.dims[i]].size//l*l].reshape(-1,l).mean(-1) for i in axis}
+        interp_dims = { (i if type(i) is str else ds.dims[i]):(
+                         ds[ds[i]].data[:ds[ds[i]].size//l*l].reshape(-1,l).mean(-1) if type(i) is str
+                         else ds[ds.dims[i]].data[:ds[ds.dims[i]].size//l*l].reshape(-1,l).mean(-1))
+                         for i in axis }
     return ds.interp(interp_dims)
 
 def get_ds_area_mean(ds, l=1, axis=None):
-    return ds_area_func(np.mean, da, l, dims=axis, chop=True)
+    return ds_area_func(np.mean, ds, l, dims=axis, chop=True)
 
-def ds_area_func(func, da, l, dims=None, chop=False):
+def apply_area_func(func, data, l, axis=None, chop=False, **kwargs):
+    if axis == None:
+        axis = range(len(data.shape))
+    if not hasattr(axis, '__iter__'):
+        axis = [axis]
+    if hasattr(l, '__iter__'):
+        ax_l = dict(zip(axis, l))
+    else:
+        ax_l = {ax:l for ax in axis}
+    data_slice = tuple()
+    reshape_1 = []
+    reshape_2 = [-1]
+    move_axis = []
+    counter = 1
+    for dim, shape in enumerate(data.shape):
+        if dim in axis:
+            if shape % ax_l[dim] != 0:
+                if chop:
+                    data_slice += (slice(0, shape//ax_l[dim]*ax_l[dim]),)
+                else:
+                    raise shapeError('Length scale '+str(l)+' is not a factor of axis '+str(dim)+
+                                     '. Please reshape input array or use keyword "chop=True"')
+            else:
+                data_slice += (slice(None),)
+            reshape_1.extend([shape//ax_l[dim], ax_l[dim]])
+            reshape_2.append(shape//ax_l[dim])
+            move_axis.append(counter)
+            counter += 2
+        else:
+            data_slice += (slice(None),)
+            reshape_1.append(shape)
+            reshape_2.append(shape)
+            counter += 1
+    return func(np.moveaxis(data[data_slice].reshape(reshape_1), move_axis, range(len(move_axis))).reshape(reshape_2), 0, **kwargs)
+
+def ds_area_func(func, da, l, dims=None, chop=False, coords_func=np.mean, **kwargs):
     if dims == None:
         dims = da.dims
-    if hasattr(dims, '__iter__') and type(dims) is not str:
-        dim_inds = [da.dims.index(dim) if type(dim) is str else dim for dim in dims ]
-    elif type(dims) is str:
-        dim_inds = [da.dims.index(dims),]
+    if not hasattr(dims, '__iter__') or type(dims) is str:
+        dims = [dims]
+    if np.all([type(dim)==str for dim in dims]):
+        axis = [da.dims.index(dim) for dim in dims]
+    elif np.all([type(dim)==int for dim in dims]):
+        axis = dims
+        dims = [da.dims[ax] for ax in axis]
     else:
-        dim_inds = [dims,]
+        raise ValueError('Dims must either be all str type or all integer type')
+    if hasattr(l, '__iter__'):
+        dim_l = dict(zip(dims, l))
+    else:
+        dim_l = {dim:l for dim in dims}
 
-    if not hasattr(l, '__iter__'):
-        l = [l]*len(dims)
+    new_coords = {key:da.coords[key] for key in da.coords.keys() if key not in da.dims}
+    for dim in da.dims:
+        new_coords[dim] = apply_area_func(coords_func, da[dim].data, dim_l[dim], chop=chop) if dim in dims else da[dim]
 
-    shape = tuple()
-    shape_slice = tuple()
-    action_inds = tuple()
-    action_count = 0
-    l_ind = 0
-    for i in range(len(da.dims)):
-        if i in dim_inds:
-            shape += (da.shape[i]//l[l_ind], l[l_ind])
-            action_inds += (action_count+1,)
-            action_count += 2
-            if chop:
-                shape_slice += (slice(0, da.shape[i]//l[l_ind]*l[l_ind]),)
-            else:
-                shape_slice += (slice(0, da.shape[i]),)
-            l_ind += 1
-        else:
-            shape += (da.shape[i],)
-            action_count += 1
-            shape_slice += (slice(0, test.shape[i]),)
 
-    return func(da[shape_slice].data.reshape(shape), action_inds)
+    return xr.DataArray(apply_area_func(func, da.data, l, axis=axis, chop=chop, **kwargs),
+                        dims=da.dims, coords=new_coords)
+
+def absmax(data, axis=None):
+    if axis == None:
+        return np.ravel(data)[np.argmax(np.abs(data))]
+    else:
+        data_slice = np.meshgrid(*(np.arange(shape) for dim, shape in enumerate(data.shape) if dim != axis), indexing='ij')
+        data_slice.insert(axis, np.argmax(np.abs(data), axis))
+        return data[tuple(data_slice)]
+
+def absmin(data, axis=None):
+    if axis == None:
+        return np.ravel(data)[np.argmin(np.abs(data))]
+    else:
+        data_slice = np.meshgrid(*(np.arange(shape) for dim, shape in enumerate(data.shape) if dim != axis), indexing='ij')
+        data_slice.insert(axis, np.argmin(np.abs(data), axis))
+        return data[tuple(data_slice)]
+
+def nanabsmax(data, axis=None):
+    if axis == None:
+        return np.ravel(data)[np.nanargmax(np.abs(data))]
+    else:
+        data_slice = np.meshgrid(*(np.arange(shape) for dim, shape in enumerate(data.shape) if dim != axis), indexing='ij')
+        data_slice.insert(axis, np.nanargmax(np.abs(data), axis))
+        return data[tuple(data_slice)]
+
+def nanabsmin(data, axis=None):
+    if axis == None:
+        return np.ravel(data)[np.nanargmin(np.abs(data))]
+    else:
+        data_slice = np.meshgrid(*(np.arange(shape) for dim, shape in enumerate(data.shape) if dim != axis), indexing='ij')
+        data_slice.insert(axis, np.nanargmin(np.abs(data), axis))
+        return data[tuple(data_slice)]

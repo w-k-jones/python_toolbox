@@ -10,7 +10,7 @@ from mpl_toolkits.basemap import Basemap
 from pyproj import Proj
 import cv2 as cv
 from dateutil.parser import parse as parse_date
-from .dataset_tools import get_ds_area_mean, match_coords
+from .dataset_tools import get_ds_area_mean, match_coords, ds_area_func
 
 def get_goes_abi_files(input_file):
     # Returns a list of the datetime and all 16 channel file names for ABI lvl1 data from the path of the name of one file
@@ -21,7 +21,7 @@ def get_goes_abi_files(input_file):
     minstr = datestr[10:12]
     secstr = datestr[12:14]
     file_date = datetime(year=int(yearstr), month=1, day=1, hour=int(hourstr), minute=int(minstr), second=int(secstr)) + timedelta(days=int(doystr)-1)
-    files = glob('/'.join(input_file.split('/')[:-1])+'/'+input_file.split('/')[-1].split('_')[0][:-2]+'*s'+yearstr+doystr+hourstr+minstr+'*.nc')
+    files = glob('/'.join(input_file.split('/')[:-1])+'/*'+'-'.join(input_file.split('/')[-1].split('_')[1].split('-')[:-1])+'*s'+yearstr+doystr+hourstr+minstr+'*.nc')
     return [file_date]+files
 
 def get_abi_date_from_filename(filename):
@@ -184,10 +184,10 @@ def get_abi_rgb(C01_ds, C02_ds, C03_ds, IR_ds=None, gamma=0.4, contrast=75, l=1)
     if IR_ds != None:
         l = l*2
     l = int(l)
-    R = get_ds_area_mean(get_abi_ref(C02_ds), l*2)
+    R = ds_area_func(np.mean, get_abi_ref(C02_ds), l*2, dims=('x','y'), chop=True)
     if l > 1:
-        G = get_ds_area_mean(get_abi_ref(C03_ds), l)
-        B = get_ds_area_mean(get_abi_ref(C01_ds), l)
+        G = ds_area_func(np.mean, get_abi_ref(C03_ds), l, dims=('x','y'), chop=True)
+        B = ds_area_func(np.mean, get_abi_ref(C01_ds), l, dims=('x','y'), chop=True)
     else:
         G = get_abi_ref(C03_ds)
         B = get_abi_ref(C01_ds)
@@ -218,9 +218,9 @@ def get_abi_rgb(C01_ds, C02_ds, C03_ds, IR_ds=None, gamma=0.4, contrast=75, l=1)
         IR = np.minimum(IR, 313)
         IR = (IR-90)/(313-90)
         IR = (1 - IR.data)/1.5
-        RGB = _contrast_correction(np.dstack([np.maximum(R, IR), np.maximum(G_true, IR), np.maximum(B, IR)]), contrast=contrast)
+        RGB = _contrast_correction(np.stack([np.maximum(R, IR), np.maximum(G_true, IR), np.maximum(B, IR)], -1), contrast=contrast)
     else:
-        RGB = _contrast_correction(np.dstack([R, G_true, B]), contrast=contrast)
+        RGB = _contrast_correction(np.stack([R, G_true, B], -1), contrast=contrast)
 
     return RGB
 
