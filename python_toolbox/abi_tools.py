@@ -66,59 +66,69 @@ def plot_goes_file(filename):
     plt.title('%s' % date.strftime('%d %B %Y'), loc='right')
     return
 
-def get_abi_lat_lon(dataset):
+def get_abi_lat_lon(dataset, dtype=None):
+    if dtype == None:
+        dtype = dataset.dtype
     p = Proj(proj='geos', h=dataset.goes_imager_projection.perspective_point_height,
              lon_0=dataset.goes_imager_projection.longitude_of_projection_origin,
              sweep=dataset.goes_imager_projection.sweep_angle_axis)
-    xx, yy = np.meshgrid(dataset.x.data*dataset.goes_imager_projection.perspective_point_height,
-                         dataset.y.data*dataset.goes_imager_projection.perspective_point_height)
+    xx, yy = np.meshgrid((dataset.x.data*dataset.goes_imager_projection.perspective_point_height).astype(dtype),
+                         (dataset.y.data*dataset.goes_imager_projection.perspective_point_height).astype(dtype))
     lons, lats = p(xx, yy, inverse=True)
     lons[lons>=1E30] = np.nan
     lats[lats>=1E30] = np.nan
     return lats, lons
 
-def get_abi_pixel_area(dataset):
-    lat, lon = get_abi_lat_lon(dataset)
-    nadir_res = float(dataset.spatial_resolution.split('km')[0])
-    xx, yy = np.meshgrid(dataset.x.data, dataset.y.data)
+def get_abi_pixel_area(dataset, dtype=None):
+    if dtype == None:
+        dtype = dataset.dtype
+    lat, lon = get_abi_lat_lon(dataset, dtype=dtype)
+    nadir_res = np.array([dataset.spatial_resolution.split('km')[0]]).astype(dtype)
+    xx, yy = np.meshgrid(dataset.astype(dtype).x.data, dataset.astype(dtype).y.data)
     lx_factor = np.cos(np.abs(np.radians(dataset.goes_imager_projection.longitude_of_projection_origin-lon))+np.abs(xx))
     ly_factor = np.cos(np.abs(np.radians(dataset.goes_imager_projection.latitude_of_projection_origin-lat))+np.abs(yy))
     area = nadir_res**2/(lx_factor*ly_factor)
     return area
 
-def get_abi_ref(dataset, check=False):
+def get_abi_ref(dataset, check=False, dtype=None):
     ref = dataset.Rad * dataset.kappa0
     if check:
         DQF = dataset.DQF
         ref[DQF<0] = np.nan
         ref[DQF>1] = np.nan
-    return ref
+    if dtype == None:
+        return ref
+    else:
+        return ref.astype(dtype)
 
-def get_abi_IR(dataset, check=False):
+def get_abi_IR(dataset, check=False, dtype=None):
     bt = (dataset.planck_fk2 / (np.log((dataset.planck_fk1 / dataset.Rad) + 1)) - dataset.planck_bc1) / dataset.planck_bc2
     if check:
         DQF = dataset.DQF
         bt[DQF<0] = np.nan
         bt[DQF>1] = np.nan
-    return bt
+    if dtype == None:
+        return bt
+    else:
+        return bt.astype(dtype)
 
-def get_abi_ds_from_files(filenames, check=False):
+def get_abi_ds_from_files(filenames, check=False, dtype=None):
     if type(filenames) is str:
         with xr.open_dataset(filenames) as ds:
             channel = ds.band_id.data[0]
             wavelength = ds.band_wavelength.data[0]
             if channel<7:
-                return get_abi_ref(ds)
+                return get_abi_ref(ds, dtype=dtype)
             else:
-                return get_abi_IR(ds)
+                return get_abi_IR(ds, dtype=dtype)
     elif hasattr(filenames, '__iter__'):
         with xr.open_mfdataset(filenames, combine='nested', concat_dim='t') as ds:
             channel = ds.band_id.data[0]
             wavelength = ds.band_wavelength.data[0]
             if channel<7:
-                return get_abi_ref(ds)
+                return get_abi_ref(ds, dtype=dtype)
             else:
-                return get_abi_IR(ds)
+                return get_abi_IR(ds, dtype=dtype)
     else:
         raise ValueError("""Error in 'get_abi_ds_from_files: filenames input must be either a string
                             or a list of strings'""")
@@ -148,19 +158,19 @@ def plot_goes_file(filename):
     plt.title('%s' % date.strftime('%d %B %Y'), loc='right')
     return
 
-def get_abi_BT_from_files(filenames, check=False):
+def get_abi_BT_from_files(filenames, check=False, dtype=None):
     """
     This function is being depreciated, using xr.open_mfdataset is much better.
     See function "get_abi_ds_from_files"
     """
     if type(filenames) is str:
         with xr.open_dataset(filenames) as ds:
-            return(get_abi_IR(ds))
+            return(get_abi_IR(ds, dtype=dtype))
     elif hasattr(filenames, '__iter__'):
         data_list = []
         for f in filenames:
             with xr.open_dataset(f) as ds:
-                data_list.append(get_abi_IR(ds))
+                data_list.append(get_abi_IR(ds, dtype=dtype))
         return xr.concat(data_list, dim='t')
     else:
         raise ValueError("""Error in 'get_abi_BT_from_files: filenames input must be either a string
@@ -184,13 +194,13 @@ def get_abi_rgb(C01_ds, C02_ds, C03_ds, IR_ds=None, gamma=0.4, contrast=75, l=1)
     if IR_ds != None:
         l = l*2
     l = int(l)
-    R = ds_area_func(np.mean, get_abi_ref(C02_ds), l*2, dims=('x','y'), chop=True)
+    R = ds_area_func(np.mean, C02_ds, l*2, dims=('x','y'), chop=True)
     if l > 1:
-        G = ds_area_func(np.mean, get_abi_ref(C03_ds), l, dims=('x','y'), chop=True)
-        B = ds_area_func(np.mean, get_abi_ref(C01_ds), l, dims=('x','y'), chop=True)
+        G = ds_area_func(np.mean, C03_ds, l, dims=('x','y'), chop=True)
+        B = ds_area_func(np.mean, C01_ds, l, dims=('x','y'), chop=True)
     else:
-        G = get_abi_ref(C03_ds)
-        B = get_abi_ref(C01_ds)
+        G = C03_ds.copy()
+        B = C01_ds.copy()
     match_coords([R,G,B], 'x')
     match_coords([R,G,B], 'y')
     match_coords([R,G,B], 't')
@@ -208,9 +218,9 @@ def get_abi_rgb(C01_ds, C02_ds, C03_ds, IR_ds=None, gamma=0.4, contrast=75, l=1)
     G_true = np.minimum(G_true, 1)
     if IR_ds is not None:
         if l//2 > 1:
-            IR = get_ds_area_mean(get_abi_IR(IR_ds), l//2)
+            IR = get_ds_area_mean(IR_ds, l//2)
         else:
-            IR = get_abi_IR(IR_ds)
+            IR = IR_ds.copy()
         match_coords([R,IR], 'x')
         match_coords([R,IR], 'y')
         match_coords([R,IR], 't')
@@ -225,12 +235,17 @@ def get_abi_rgb(C01_ds, C02_ds, C03_ds, IR_ds=None, gamma=0.4, contrast=75, l=1)
     return RGB
 
 def get_abi_RGB_from_files(C01_file, C02_file, C03_file, IR_file=None, gamma=0.4, contrast=75, l=1):
-    with xr.open_dataset(C01_file) as C01_ds, xr.open_dataset(C02_file) as C02_ds, xr.open_dataset(C03_file) as C03_ds:
-        if IR_file != None:
-            with xr.open_dataset(IR_file) as IR_ds:
-                RGB = get_abi_rgb(C01_ds, C02_ds, C03_ds, IR_ds=IR_ds, gamma=gamma, contrast=contrast, l=l)
-        else:
-            RGB = get_abi_rgb(C01_ds, C02_ds, C03_ds, gamma=gamma, contrast=contrast, l=l)
+    if IR_file != None:
+        RGB = get_abi_rgb(get_abi_ds_from_files(C01_ds),
+                          get_abi_ds_from_files(C02_ds),
+                          get_abi_ds_from_files(C03_ds),
+                          IR_ds=get_abi_ds_from_files(IR_ds),
+                          gamma=gamma, contrast=contrast, l=l)
+    else:
+        RGB = get_abi_rgb(get_abi_ds_from_files(C01_ds),
+                          get_abi_ds_from_files(C02_ds),
+                          get_abi_ds_from_files(C03_ds),
+                          gamma=gamma, contrast=contrast, l=l)
     return RGB
 
 def _recursive_linker(links_list1=None, links_list2=None, label_list1=None, label_list2=None, overlap_list1=None, overlap_list2=None):
@@ -276,6 +291,9 @@ def link_labels(labels1, labels2):
         links_list2.append(temp_links2)
     return links_list1, links_list2
 
-def get_flow(frame0, frame1):
-    flow = cv.calcOpticalFlowFarneback(ds_to_8bit(frame0).data.compute(),ds_to_8bit(frame1).data.compute(), None, 0.5, 3, 4, 3, 5, 1.2, 0)
+def get_flow(frame0, frame1, dtype=None):
+    if dtype == None:
+        flow = cv.calcOpticalFlowFarneback(ds_to_8bit(frame0).data.compute(),ds_to_8bit(frame1).data.compute(), None, 0.5, 3, 4, 3, 5, 1.2, 0)
+    else:
+        flow = cv.calcOpticalFlowFarneback(ds_to_8bit(frame0).data.compute(),ds_to_8bit(frame1).data.compute(), None, 0.5, 3, 4, 3, 5, 1.2, 0).astype(dtype)
     return flow[...,0], flow[...,1]

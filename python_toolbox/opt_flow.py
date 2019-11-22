@@ -5,7 +5,7 @@ import xarray as xr
 from scipy import interpolate
 from python_toolbox import dataset_tools
 from scipy import ndimage as ndi
-
+import pdb
 
 def ds_to_8bit(ds, vmin=None, vmax=None):
     if vmin is None:
@@ -15,9 +15,13 @@ def ds_to_8bit(ds, vmin=None, vmax=None):
     ds_out = (ds-vmin)*255/(vmax-vmin)
     return ds_out.astype('uint8')
 
-def get_ds_flow(da, direction='forwards', pyr_scale=0.5, levels=5, winsize=15, iterations=4, poly_n=5, poly_sigma=1.2, flags=cv.OPTFLOW_FARNEBACK_GAUSSIAN):
-    x_flow = xr.zeros_like(da).compute()*np.nan
-    y_flow = xr.zeros_like(da).compute()*np.nan
+def get_ds_flow(da, direction='forwards', pyr_scale=0.5, levels=5, winsize=15, iterations=4, poly_n=5, poly_sigma=1.2, flags=cv.OPTFLOW_FARNEBACK_GAUSSIAN, dtype=None):
+    if dtype == None:
+        x_flow = xr.zeros_like(da).compute()*np.nan
+        y_flow = xr.zeros_like(da).compute()*np.nan
+    else:
+        x_flow = xr.zeros_like(da, dtype=dtype).compute()*np.nan
+        y_flow = xr.zeros_like(da, dtype=dtype).compute()*np.nan
     if direction == 'forwards':
         frame1 = ds_to_8bit(da[0]).data.compute()
         for i in range(1, da.coords['t'].size):
@@ -72,6 +76,12 @@ def get_flow_func(field, replace_missing=False, **kwargs):
     if replace_missing:
         flow_forward[0][-1], flow_forward[1][-1] = -flow_backward[0][-1], -flow_backward[1][-1]
         flow_backward[0][0], flow_backward[1][0] = -flow_forward[0][0], -flow_forward[1][0]
+        wh = np.logical_or(np.isnan(flow_forward[0]), np.isnan(flow_forward[1]))
+        if np.any(wh):
+            flow_forward[wh] = 0
+        wh = np.logical_or(np.isnan(flow_backward[0]), np.isnan(flow_backward[1]))
+        if np.any(wh):
+            flow_backward[wh] = 0
     return lambda t : (0.5*t*(t+1)*flow_forward[0].to_masked_array() + 0.5*t*(t-1)*flow_backward[0].to_masked_array(),
                        0.5*t*(t+1)*flow_forward[1].to_masked_array() + 0.5*t*(t-1)*flow_backward[1].to_masked_array())
 
@@ -84,7 +94,9 @@ def interp_flow(da, flow, method='linear'):
     return interp_da
 
 def interp_ds_flow(da, x_flow, y_flow, direction='forwards', method='linear'):
-    da_flow = xr.zeros_like(da).compute()*np.nan
+    da_flow = xr.zeros_like(da).compute()
+    if da_flow.dtype in [np.float16, np.float32, np.float64, np.float128]:
+        da_flow *= np.nan
     if direction == 'forwards':
         for i in range(da.coords['t'].size-1):
             da_flow[i] = interp_flow(da[i+1].compute(), np.stack([x_flow[i], y_flow[i]], axis=-1), method=method)
@@ -101,7 +113,9 @@ def get_flow_stack(field, flow_func, method='linear'):
                       interp_ds_flow(field, *flow_func(1), method=method)],
                      dim='t_off')
 
-def flow_convolve(flow_data, structure=None, wrap=False, function=None, **kwargs):
+def flow_convolve(flow_data, structure=None, wrap=False, function=None, dtype=None, **kwargs):
+    if dtype == None:
+        dtype=flow_data.dtype
     n_dims = len(flow_data.shape)-1
     assert(n_dims > 0)
     if hasattr(structure, "shape"):
@@ -123,7 +137,6 @@ def flow_convolve(flow_data, structure=None, wrap=False, function=None, **kwargs
                 structure[tuple(index)] = 1
                 index[i] = 2
                 structure[tuple(index)] = 1
-
     if n_dims > 2:
         spat = np.meshgrid(*(range(s) for s in flow_data.shape[2:]), indexing='ij')
     elif n_dims == 2:
@@ -134,7 +147,7 @@ def flow_convolve(flow_data, structure=None, wrap=False, function=None, **kwargs
     re_shape = (-1,)+(1,)*spat_nd
     tt = np.full_like(spat[0],1)
     wh_struct = structure.ravel()!=0
-    multi_struct = structure.ravel()[wh_struct].reshape(re_shape)
+    multi_struct = structure.ravel()[wh_struct].reshape(re_shape).astype(dtype)
     n_struct = np.sum(wh_struct)
     offsets = [offset-1 for offset
                in np.unravel_index(np.arange(structure.size)[wh_struct], structure.shape)]
@@ -145,13 +158,13 @@ def flow_convolve(flow_data, structure=None, wrap=False, function=None, **kwargs
         offset_mask = np.any([offset_inds[i]!=offset_inds_corrected[i] for i in range(len(offset_inds))],0)
     offset_inds_corrected = tuple(offset_inds_corrected)
     if function is not None:
-        output = ma.empty(flow_data.shape[1:])
+        output = ma.empty(flow_data.shape[1:], dtype)
         for i in range(flow_data.shape[1]):
             temp = ma.array(flow_data[:,i][offset_inds_corrected])*multi_struct
             temp.mask = np.logical_or(np.isnan(temp), offset_mask)
             output[i] = function(temp, 0, **kwargs)
     else:
-        output = ma.empty((n_struct,)+flow_data.shape[1:])
+        output = ma.empty((n_struct,)+flow_data.shape[1:], dtype)
         for i in range(flow_data.shape[1]):
             temp = ma.array(flow_data[:,i][offset_inds_corrected])*multi_struct
             temp.mask = np.logical_or(np.isnan(temp), offset_mask)
@@ -186,7 +199,7 @@ def flow_sobel(flow_stack, axis=None, direction=None):
         for i in axis:
             def temp_sobel_func(temp, axis, counter=[0]):
                 sobel_matrix = np.transpose(get_sobel_matrix(3),
-                               np.roll(np.arange(3),(1+i)%3)).ravel().reshape((-1,1,1))
+                               np.roll(np.arange(3),(1+i)%3)).ravel().reshape((-1,1,1)).astype(temp.dtype)
                 output = np.sum((temp-flow_stack[1][counter[0]]) * sobel_matrix, axis)
                 counter[0]+=1
                 return output
@@ -309,7 +322,7 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
     if structure is None:
         if debug_mode:
             print("Setting structure to default")
-        structure = np.ones([3,3,3])
+        structure = np.ones([3,3,3], 'bool')
         structure[0,0,0], structure[0,0,-1], structure[0,-1,0], structure[0,-1,-1], structure[-1,0,0], structure[-1,0,-1], structure[-1,-1,0], structure[-1,-1,-1] = 0,0,0,0,0,0,0,0
     if len(structure.shape)<3:
         if debug_mode:
@@ -328,52 +341,81 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
         temp = np.zeros([3,3,3])
         temp[wh] = structure
         structure=temp
-
+    structure = structure.astype('bool')
     # Get ravelled indices for each pixel in the field, and find nearest neighbours using flow field
     if debug_mode:
         print("Calculated indices stack")
-    inds = np.arange(field.size).reshape(field.shape)
-    ind_stack = get_flow_stack(xr.DataArray(inds, dims=('t','y','x')),
-                               flow_func, method='nearest').to_masked_array().astype(int)
+    # Set inds dtype to minimum possible to contain all values to save memory
+    if field.size<np.iinfo(np.uint16).max:
+        inds_dtype = np.uint16
+    elif field.size<np.iinfo(np.uint32).max:
+        inds_dtype = np.uint32
+    else:
+        inds_dtype = np.uint64
+    inds = np.arange(field.size, dtype=inds_dtype).reshape(field.shape)
+    # ind_stack = get_flow_stack(xr.DataArray(inds, dims=('t','y','x')),
+    #                            flow_func, method='nearest').to_masked_array().astype(int)
     # Get nearest flow neighbour values for the field
-    if debug_mode:
-        print("Calculating field stack")
-    field_stack = get_flow_stack(xr.DataArray(field, dims=('t','y','x')),
-                                 flow_func, method='nearest').to_masked_array()
-    # Find index of the smallest neighbour ro each pixel in the field
+    # if debug_mode:
+    #     print("Calculating field stack")
+    # field_stack = get_flow_stack(xr.DataArray(field, dims=('t','y','x')),
+    #                              flow_func, method='nearest').to_masked_array()
+    # # Find index of the smallest neighbour ro each pixel in the field
     if debug_mode:
         print("Calculating nearest neighbours")
-    min_convolve = flow_convolve(field_stack, structure=structure, function=np.nanargmin)
-    inds_convolve = flow_convolve(ind_stack, structure=structure)
-    inds_convolve.mask = np.logical_or(inds_convolve.mask, inds_convolve<0)
-    inds_neighbour = inds_convolve[tuple([min_convolve.data.astype(int)]+np.meshgrid(*(range(s) for s in inds.shape), indexing='ij'))].astype(int)
+    min_convolve = flow_convolve(get_flow_stack(xr.DataArray(field, dims=('t','y','x')),
+                                 flow_func, method='nearest').to_masked_array(),
+                                 structure=structure, function=np.nanargmin,
+                                 dtype=np.uint8)
+    min_convolve = np.minimum(np.maximum(min_convolve, 0), np.sum(structure!=0).astype(np.uint8)-1)
+    # inds_convolve = flow_convolve(ind_stack, structure=structure)
+    # inds_convolve.mask = np.logical_or(inds_convolve.mask, inds_convolve<0)
+    def min_inds_func(inds_convolve, axis, counter=[0]):
+        inds_convolve.mask = np.logical_or(inds_convolve.mask, inds_convolve<0)
+        inds_neighbour = inds_convolve[tuple([min_convolve[counter[0]]]
+                                             + np.meshgrid(*(np.arange(s, dtype=inds_dtype)
+                                                             for s in inds.shape[1:]),
+                                             indexing='ij'))]
+        counter[0]+=1
+        return inds_neighbour
+
+    inds_neighbour = flow_convolve(get_flow_stack(xr.DataArray(inds, dims=('t','y','x')),
+                                   flow_func, method='nearest').to_masked_array(),
+                                   structure=structure, function=min_inds_func,
+                                   dtype=inds_dtype)
+
+    del min_convolve
+    # inds_neighbour = inds_convolve[tuple([min_convolve.data.astype(int)]+np.meshgrid(*(range(s) for s in inds.shape), indexing='ij'))].astype(int)
+    wh = np.logical_or(np.logical_or(inds_neighbour.data<0, inds_neighbour.data>inds.max()), inds_neighbour.mask)
+    if np.any(wh):
+        inds_neighbour.data[wh] = inds[wh]
+    inds_neighbour.fill_value=0
     # Now iterate over neighbour network to find minimum convergence point for each pixel
         # Each pixel will either reach a minimum or loop back to itself
-    test_neighbour = inds_neighbour.copy()
-    type_converge = np.zeros(test_neighbour.shape)
-    iter_converge = np.zeros(test_neighbour.shape)
-    ind_converge = np.zeros(test_neighbour.shape).astype(int)
-    fill_markers = markers.astype(int)-mask.astype(int)
+    type_converge = np.zeros(inds_neighbour.shape, np.uint8)
+    # iter_converge = np.zeros(inds_neighbour.shape, np.uint8)
+    # ind_converge = np.zeros(inds_neighbour.shape, inds_dtype)
+    # fill_markers = markers.astype(ind_stack)-mask.astype(int)
     max_markers = np.nanmax(markers)
     if debug_mode:
         print("Finding network convergence locations")
     for i in range(max_iter):
-        old_neighbour, test_neighbour = test_neighbour.copy(), test_neighbour.ravel()[test_neighbour.ravel()].reshape(test_neighbour.shape)
-        # wh_mark = np.logical_and(type_converge==0, fill_markers.ravel()[test_neighbour.ravel().reshape(fill_markers.shape)]!=0)
+        old_neighbour, inds_neighbour = inds_neighbour.copy(), inds_neighbour.ravel()[inds_neighbour.ravel()].reshape(inds_neighbour.shape)
+        # wh_mark = np.logical_and(type_converge==0, fill_markers.ravel()[inds_neighbour.ravel().reshape(fill_markers.shape)]!=0)
         # if np.any(wh_mark):
         #     type_converge[wh_mark] = 3
         #     iter_converge[wh_mark] = i
-        #     ind_converge[wh_mark] = test_neighbour[wh_mark]
-        wh_ind = np.logical_and(type_converge==0, test_neighbour==inds)
+        #     ind_converge[wh_mark] = inds_neighbour[wh_mark]
+        wh_ind = np.logical_and(type_converge==0, inds_neighbour==inds)
         if np.any(wh_ind):
             type_converge[wh_ind] = 1
-            iter_converge[wh_ind] = i
-            ind_converge[wh_ind] = test_neighbour[wh_ind]
-        wh_conv = np.logical_and(type_converge==0, test_neighbour==old_neighbour)
+            # iter_converge[wh_ind] = i
+            # ind_converge[wh_ind] = inds_neighbour[wh_ind]
+        wh_conv = np.logical_and(type_converge==0, inds_neighbour==old_neighbour)
         if np.any(wh_conv):
             type_converge[wh_conv] = 2
-            iter_converge[wh_conv] = i
-            ind_converge[wh_ind] = test_neighbour[wh_ind]
+            # iter_converge[wh_conv] = i
+            # ind_converge[wh_ind] = inds_neighbour[wh_ind]
         if debug_mode:
             print("Iteration:", i+1)
             print("Pixels converged", np.sum(type_converge!=0))
@@ -381,16 +423,24 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
             if debug_mode:
                 print("All pixels converged")
             break
-
+    del old_neighbour
     # Use converged locations to fill watershed basins
     if debug_mode:
         print("Filling basins")
-    fill_markers = markers.astype(int)-mask.astype(int)
-    wh = np.logical_and(type_converge==1, fill_markers==0)
-    fill_markers[wh] = ndi.label(wh)[0][wh]+max_markers
-    # fill = fill_markers.ravel()[ind_converge.ravel().astype(int)].reshape(fill_markers.shape)
-    fill = fill_markers.ravel()[test_neighbour.ravel().astype(int)].reshape(fill_markers.shape)
-    fill[markers]=1
+    wh = np.logical_and(type_converge==1, np.logical_not(np.logical_xor(markers!=0, mask)))
+    temp_markers = ndi.label(wh)[0][wh]+max_markers
+    if temp_markers.max()<np.iinfo(np.int16).max:
+        mark_dtype = np.int16
+    elif temp_markers.max()<np.iinfo(np.int32).max:
+        mark_dtype = np.int32
+    else:
+        mark_dtype = np.int64
+    fill_markers = (markers.astype(mark_dtype)-mask.astype(mark_dtype))
+    fill_markers[wh] = temp_markers
+    # fill = fill_markers.ravel()[ind_converge.ravel()].reshape(fill_markers.shape)
+    fill = fill_markers.ravel()[inds_neighbour.ravel()].reshape(fill_markers.shape)
+    del fill_markers, temp_markers, type_converge, inds_neighbour
+    fill[markers>0]=markers[markers>0]
     fill[mask]=-1
     wh = fill==0
     if np.any(wh):
@@ -401,8 +451,8 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
     # Now overflow watershed basins into neighbouring basins until only marker labels are left
     if debug_mode:
         print("Joining labels")
-    while np.any(fill>max_markers):
-        iter = 1
+    # while np.any(fill>max_markers):
+    for iter in range(1, max_iter+1):
         # Make a flow stack using the current fill
         temp_fill = get_flow_stack(xr.DataArray(fill, dims=('t','y','x')),
                                                 flow_func, method='nearest').to_masked_array()
@@ -416,7 +466,10 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
             output = np.nanmin(temp, axis)
             counter[0]+=1
             return output
-        min_edge = flow_convolve(field_stack, structure=structure, function=min_edge_func)
+        min_edge = flow_convolve(get_flow_stack(xr.DataArray(field, dims=('t','y','x')),
+                                 flow_func, method='nearest').to_masked_array(),
+                                 structure=structure, function=min_edge_func,
+                                 dtype=np.float32)
 
         # Function to find the offset of the minimum neighbour with a different label
         def argmin_edge_func(temp, axis, counter=[0]):
@@ -427,19 +480,44 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
             output = np.nanargmin(temp, axis)
             counter[0]+=1
             return output
-        argmin_edge = flow_convolve(field_stack, structure=structure, function=argmin_edge_func)
-        inds_edge = inds_convolve[tuple([argmin_edge.data.astype(int)]+np.meshgrid(*(range(s) for s in inds.shape), indexing='ij'))].astype(int)
+        argmin_edge = flow_convolve(get_flow_stack(xr.DataArray(field, dims=('t','y','x')),
+                                    flow_func, method='nearest').to_masked_array(),
+                                    structure=structure, function=argmin_edge_func,
+                                    dtype=np.uint8)
+
+        def min_inds_func(inds_convolve, axis, counter=[0]):
+            inds_convolve.mask = np.logical_or(inds_convolve.mask, inds_convolve<0)
+            inds_neighbour = inds_convolve[tuple([argmin_edge[counter[0]].data]
+                                                 + np.meshgrid(*(np.arange(s, dtype=inds_dtype)
+                                                                 for s in inds.shape[1:]),
+                                                 indexing='ij'))]
+            counter[0]+=1
+            return inds_neighbour
+
+        inds_edge = flow_convolve(get_flow_stack(xr.DataArray(inds, dims=('t','y','x')),
+                                  flow_func, method='nearest').to_masked_array(),
+                                  structure=structure, function=min_inds_func,
+                                  dtype=inds_dtype)
+
+        # inds_edge = inds_convolve[tuple([argmin_edge.data.astype(int)]+np.meshgrid(*(range(s) for s in inds.shape), indexing='ij'))].astype(int)
 
         object_slices=ndi.find_objects(np.maximum(fill,0))
-        for i in np.arange(1, len(object_slices)):
-            if object_slices[i] is not None:
-                wh = fill[object_slices[i]]==i+1
-                argmin = np.nanargmin(np.maximum(min_edge, field)[object_slices[i]][wh])
-                new_label = fill.ravel()[inds_edge[object_slices[i]][wh][argmin]]
-                if new_label<=i:
-                    fill[object_slices[i]][wh] = new_label
+        for j in range(max_markers, len(object_slices)):
+            if object_slices[j] is not None:
+                wh = fill[object_slices[j]]==j+1
+                argmin = np.maximum(np.minimum(np.nanargmin(np.maximum(min_edge, field)[object_slices[j]][wh]),
+                                               np.sum(wh)), 0).astype(inds_dtype)
+                try:
+                    new_label = fill.ravel()[inds_edge[object_slices[j]][wh][argmin]]
+                except:
+                    if debug_mode:
+                        print('Failed to assign new_label, label:',j+1)
+                    new_label = -1
+                if new_label<=j:
+                    fill[object_slices[j]][wh] = new_label
         if debug_mode:
             print("Iteration:", iter)
             print("Remaining labels:", np.unique(fill).size)
-        iter += 1
+        if np.nanmax(fill)<=max_markers:
+            break
     return fill

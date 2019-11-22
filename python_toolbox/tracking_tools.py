@@ -368,3 +368,120 @@ def expand_labels_optflow(labels, x_flow_forwards, y_flow_forwards,
         old_sum = new_sum
 
     return iter_labels
+
+def flow_gradient_watershed(field, markers, mask=None, flow=None, max_iter=100, max_no_progress=10, expand_mask=True):
+    import numpy as np
+    from scipy import interpolate
+    import scipy.ndimage as ndi
+    from skimage.feature import peak_local_max
+    import warnings
+    shape = [np.arange(shape) for shape in field.shape]
+    grids = np.stack(np.meshgrid(*shape, indexing='ij'),-1)
+    grads = np.stack(np.gradient(-field),-1)
+    if flow is not None:
+        if grids.shape[-1] == 2:
+            interp_flow_for = interpolate.interpn(shape, field,
+                                              np.stack([grids[1:,...,0],
+                                                        np.maximum(np.minimum(
+                                                            grids[1:,...,1:].squeeze()+flow[:-1],
+                                                            (np.array(field.shape)-1)[1:]), 0)],-1),
+                                              method='linear')
+            interp_flow_back = interpolate.interpn(shape, field,
+                                              np.stack([grids[:-1,...,0],
+                                                        np.maximum(np.minimum(
+                                                            grids[:-1,...,1:].squeeze()-flow[1:],
+                                                            (np.array(field.shape)-1)[1:]), 0)],-1),
+                                              method='linear')
+        else:
+            interp_flow_for = interpolate.interpn(shape, field,
+                                              np.concatenate([grids[1:,...,0][...,np.newaxis],
+                                                        np.maximum(np.minimum(
+                                                            grids[1:,...,1:].squeeze()+flow[:-1],
+                                                            (np.array(field.shape)-1)[1:]), 0)],-1),
+                                              method='linear')
+            interp_flow_back = interpolate.interpn(shape, field,
+                                              np.concatenate([grids[:-1,...,0][...,np.newaxis],
+                                                        np.maximum(np.minimum(
+                                                            grids[:-1,...,1:].squeeze()-flow[1:],
+                                                            (np.array(field.shape)-1)[1:]), 0)],-1),
+                                              method='linear')
+        # Replace the first dimension gradients with the new flow gradients
+        grads[1:-1,...,0] = -(interp_flow_for[1:]-interp_flow_back[:-1])/2
+        grads[0,...,0] = -(interp_flow_for[0]-field[0])
+        grads[-1,...,0] = (interp_flow_back[-1]-field[-1])
+    grads_mag = (np.sum(grads**2,-1)**0.5)
+    wh_mag = grads_mag!=0
+    new_grads = grads.copy()
+    new_grads[wh_mag] /= grads_mag[wh_mag][...,np.newaxis]
+    pos = grids.astype(float)+new_grads
+    if flow is not None:
+        if pos.shape[-1] == 2:
+            pos[...,1] += flow*new_grads[...,0]
+        else:
+            pos[...,1:] += flow*new_grads[...,0][...,np.newaxis]
+    pos = np.maximum(np.minimum(pos, (np.array(field.shape)-1)), 0)
+
+    local_min = peak_local_max(-field, indices=False, exclude_border=False)
+    max_markers = np.nanmax(markers)
+    new_markers = ndi.label(np.logical_or(local_min, np.logical_not(wh_mag))*(markers==0), structure=np.ones([3]*len(field.shape)))[0]
+    new_markers[new_markers>0]+=max_markers
+    fill_markers = markers+new_markers
+    if mask is not None:
+        fill_markers[np.logical_not(mask)] = -1
+    fill = fill_markers.copy()
+    wh = fill==0
+    n_to_fill = np.sum(wh)
+    counter = 0
+    for step in range(1, max_iter+1):
+        fill[wh] = interpolate.interpn(shape, fill, pos[wh], method='nearest')
+        wh = fill==0
+        if np.sum(wh) == n_to_fill:
+            counter += 1
+            if counter >= max_no_progress:
+                warnings.warn('Reached maximum iterations without progress. Remaining unfilled pixels = '+str(n_to_fill))
+                break
+        else:
+            counter = 0
+            n_to_fill = np.sum(wh)
+        if np.sum(wh) == 0:
+            break
+        else:
+            new_grads = np.stack([interpolate.interpn(shape, grads[...,i], pos[wh], method='linear')
+                                  for i in range(grads.shape[-1])], -1)
+            new_grads_mag = (np.sum(new_grads**2,-1)**0.5)
+            wh_mag = new_grads_mag!=0
+            new_grads[wh_mag] /= new_grads_mag[wh_mag][...,np.newaxis]
+            if flow is not None:
+                new_flow = interpolate.interpn(shape, flow, pos[wh], method='linear')
+                if new_grads.shape[-1] == 2:
+                    new_grads[...,1] += new_flow * new_grads[...,0]
+                else:
+                    new_grads[...,1:] += new_flow * new_grads[...,0][...,np.newaxis]
+            pos[wh] += new_grads
+            pos = np.maximum(np.minimum(pos, (np.array(field.shape)-1)), 0)
+    else:
+        warnings.warn('Reached maximum iterations without completion. Remaining unfilled pixels = '+str(n_to_fill))
+
+    for i in np.unique(fill[fill>max_markers]):
+        wh_i = fill==i
+        edges = ndi.morphology.binary_dilation(wh_i)*(fill!=i)
+        if expand_mask:
+            wh = edges*(fill!=0)
+        else:
+            wh = edges*(fill>0)
+        if np.any(wh):
+            min_label = fill[wh][np.argmin(field[wh])]
+        else:
+            min_label = 0
+        fill[wh_i] = min_label
+    print(step)
+    return np.maximum(fill,0)
+
+# def flow_neighbour(field, flow=None, structure=None):
+#     if structure=None:
+#         structure=np.array()
+#
+#
+#     return
+#
+# def flow_neighbour_watershed(field, markers, mask=None, flow=None, max_iter=100, max_no_progress=10, expand_mask=True):

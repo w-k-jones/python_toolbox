@@ -1,9 +1,14 @@
 import xarray as xr
 import numpy as np
 
-def match_coords(ds_list, dim):
-    for ds in ds_list[1:]:
-        ds[dim] = ds_list[0][dim]
+def match_coords(ds_list, dim=None):
+    if dim is None:
+        dims = ds_list[0].dims
+        for d in dims:
+            match_coords(ds_list, d)
+    else:
+        for ds in ds_list[1:]:
+            ds[dim] = ds_list[0][dim]
     return
 
 def interp_ds_area(ds, l=1, axis=None):
@@ -76,7 +81,6 @@ def ds_area_func(func, da, l, dims=None, chop=False, coords_func=np.mean, **kwar
     new_coords = {key:da.coords[key] for key in da.coords.keys() if key not in da.dims}
     for dim in da.dims:
         new_coords[dim] = apply_area_func(coords_func, da[dim].data, dim_l[dim], chop=chop) if dim in dims else da[dim]
-
 
     return xr.DataArray(apply_area_func(func, da.data, l, axis=axis, chop=chop, **kwargs),
                         dims=da.dims, coords=new_coords)
