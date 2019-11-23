@@ -158,11 +158,20 @@ def flow_convolve(flow_data, structure=None, wrap=False, function=None, dtype=No
         offset_mask = np.any([offset_inds[i]!=offset_inds_corrected[i] for i in range(len(offset_inds))],0)
     offset_inds_corrected = tuple(offset_inds_corrected)
     if function is not None:
-        output = ma.empty(flow_data.shape[1:], dtype)
-        for i in range(flow_data.shape[1]):
-            temp = ma.array(flow_data[:,i][offset_inds_corrected])*multi_struct
-            temp.mask = np.logical_or(np.isnan(temp), offset_mask)
-            output[i] = function(temp, 0, **kwargs)
+        if hasattr(function, '__iter__'):
+            n_func = len(function)
+            output = [ma.empty(flow_data.shape[1:], dtype)]*n_func
+            for i in range(flow_data.shape[1]):
+                temp = ma.array(flow_data[:,i][offset_inds_corrected])*multi_struct
+                temp.mask = np.logical_or(np.isnan(temp), offset_mask)
+                for j in range(n_func):
+                    output[j][i] = function[j](temp, 0, **kwargs)
+        else:
+            output = ma.empty(flow_data.shape[1:], dtype)
+            for i in range(flow_data.shape[1]):
+                temp = ma.array(flow_data[:,i][offset_inds_corrected])*multi_struct
+                temp.mask = np.logical_or(np.isnan(temp), offset_mask)
+                output[i] = function(temp, 0, **kwargs)
     else:
         output = ma.empty((n_struct,)+flow_data.shape[1:], dtype)
         for i in range(flow_data.shape[1]):
@@ -187,7 +196,7 @@ def get_sobel_matrix(ndims):
         sobel_matrix = np.multiply.outer(np.array([1,2,1]), sobel_matrix)
     return sobel_matrix
 
-def flow_sobel(flow_stack, axis=None, direction=None):
+def flow_sobel(flow_stack, axis=None, direction=None, magnitude=False):
     # temp_convolve = flow_convolve(flow_stack, structure=np.ones([3,3,3]))
     nd = len(flow_stack.shape)-1
     output = []
@@ -196,42 +205,80 @@ def flow_sobel(flow_stack, axis=None, direction=None):
     if not hasattr(axis, '__iter__'):
         axis = [axis]
     if direction is None:
-        for i in axis:
-            def temp_sobel_func(temp, axis, counter=[0]):
-                sobel_matrix = np.transpose(get_sobel_matrix(3),
+        if magnitude:
+            def temp_sobel_func(temp, ax, counter=[0]):
+                output = ma.zeros(temp.shape[1:])
+                for i in axis:
+                    sobel_matrix = np.transpose(get_sobel_matrix(3),
                                np.roll(np.arange(3),(1+i)%3)).ravel().reshape((-1,1,1)).astype(temp.dtype)
-                output = np.sum((temp-flow_stack[1][counter[0]]) * sobel_matrix, axis)
+                    output += np.sum((temp-flow_stack[1][counter[0]]) * sobel_matrix, 0)**2
                 counter[0]+=1
-                return output
+                return output**0.5
+            output = flow_convolve(flow_stack, structure=np.ones([3,3,3]),
+                                   function=temp_sobel_func)
+        else:
+            for i in axis:
+                def temp_sobel_func(temp, axis, counter=[0]):
+                    sobel_matrix = np.transpose(get_sobel_matrix(3),
+                                   np.roll(np.arange(3),(1+i)%3)).ravel().reshape((-1,1,1)).astype(temp.dtype)
+                    output = np.sum((temp-flow_stack[1][counter[0]]) * sobel_matrix, axis)
+                    counter[0]+=1
+                    return output
 
-            output.append(flow_convolve(flow_stack, structure=np.ones([3,3,3]),
-                                        function=temp_sobel_func))
+                output.append(flow_convolve(flow_stack, structure=np.ones([3,3,3]),
+                                            function=temp_sobel_func))
 
     elif direction == 'uphill':
-        for i in axis:
-            def temp_sobel_func(temp, axis, counter=[0]):
-                sobel_matrix = np.transpose(get_sobel_matrix(3),
-                               np.roll(np.arange(3),(1+i)%3)).ravel().reshape((-1,1,1))
-                output = np.sum(np.maximum(temp-flow_stack[1][counter[0]], 0)
-                                * sobel_matrix, axis)
+        if magnitude:
+            def temp_sobel_func(temp, ax, counter=[0]):
+                output = ma.zeros(temp.shape[1:])
+                for i in axis:
+                    sobel_matrix = np.transpose(get_sobel_matrix(3),
+                               np.roll(np.arange(3),(1+i)%3)).ravel().reshape((-1,1,1)).astype(temp.dtype)
+                    output += np.sum(np.maximum(temp-flow_stack[1][counter[0]], 0)
+                                     * sobel_matrix, 0)**2
                 counter[0]+=1
-                return output
+                return output**0.5
+            output = flow_convolve(flow_stack, structure=np.ones([3,3,3]),
+                                   function=temp_sobel_func)
+        else:
+            for i in axis:
+                def temp_sobel_func(temp, axis, counter=[0]):
+                    sobel_matrix = np.transpose(get_sobel_matrix(3),
+                                   np.roll(np.arange(3),(1+i)%3)).ravel().reshape((-1,1,1))
+                    output = np.sum(np.maximum(temp-flow_stack[1][counter[0]], 0)
+                                    * sobel_matrix, axis)
+                    counter[0]+=1
+                    return output
 
-            output.append(flow_convolve(flow_stack, structure=np.ones([3,3,3]),
-                                        function=temp_sobel_func))
+                output.append(flow_convolve(flow_stack, structure=np.ones([3,3,3]),
+                                            function=temp_sobel_func))
 
     elif direction == 'downhill':
-        for i in axis:
-            def temp_sobel_func(temp, axis, counter=[0]):
-                sobel_matrix = np.transpose(get_sobel_matrix(3),
-                               np.roll(np.arange(3),(1+i)%3)).ravel().reshape((-1,1,1))
-                output = np.sum(np.minimum(temp-flow_stack[1][counter[0]], 0)
-                                * sobel_matrix, axis)
+        if magnitude:
+            def temp_sobel_func(temp, ax, counter=[0]):
+                output = ma.zeros(temp.shape[1:])
+                for i in axis:
+                    sobel_matrix = np.transpose(get_sobel_matrix(3),
+                               np.roll(np.arange(3),(1+i)%3)).ravel().reshape((-1,1,1)).astype(temp.dtype)
+                    output += np.sum(np.minimum(temp-flow_stack[1][counter[0]], 0)
+                                     * sobel_matrix, 0)**2
                 counter[0]+=1
-                return output
+                return output**0.5
+            output = flow_convolve(flow_stack, structure=np.ones([3,3,3]),
+                                   function=temp_sobel_func)
+        else:
+            for i in axis:
+                def temp_sobel_func(temp, axis, counter=[0]):
+                    sobel_matrix = np.transpose(get_sobel_matrix(3),
+                                   np.roll(np.arange(3),(1+i)%3)).ravel().reshape((-1,1,1))
+                    output = np.sum(np.minimum(temp-flow_stack[1][counter[0]], 0)
+                                    * sobel_matrix, axis)
+                    counter[0]+=1
+                    return output
 
-            output.append(flow_convolve(flow_stack, structure=np.ones([3,3,3]),
-                                        function=temp_sobel_func))
+                output.append(flow_convolve(flow_stack, structure=np.ones([3,3,3]),
+                                            function=temp_sobel_func))
     else:
         raise ValueError("""direction must be 'uphill', 'downhill' or None""")
     return output
@@ -317,7 +364,7 @@ def flow_gradient_watershed(flow_stack, flow_func, markers, mask=None, max_iter=
     print(step)
     return np.maximum(fill,0)
 
-def flow_network_watershed(field, markers, flow_func, mask=None, structure=None, max_iter=100, max_no_progress=10, expand_mask=True, debug_mode=False):
+def flow_network_watershed(field, markers, flow_func, mask=None, structure=None, max_iter=100, debug_mode=False, low_memory=False):
     # Check structure input, set default and check dimensions and shape
     if structure is None:
         if debug_mode:
@@ -353,6 +400,9 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
     else:
         inds_dtype = np.uint64
     inds = np.arange(field.size, dtype=inds_dtype).reshape(field.shape)
+    if not low_memory:
+        field_stack = get_flow_stack(xr.DataArray(field, dims=('t','y','x')),
+                                     flow_func, method='nearest').to_masked_array()
     # ind_stack = get_flow_stack(xr.DataArray(inds, dims=('t','y','x')),
     #                            flow_func, method='nearest').to_masked_array().astype(int)
     # Get nearest flow neighbour values for the field
@@ -363,10 +413,15 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
     # # Find index of the smallest neighbour ro each pixel in the field
     if debug_mode:
         print("Calculating nearest neighbours")
-    min_convolve = flow_convolve(get_flow_stack(xr.DataArray(field, dims=('t','y','x')),
-                                 flow_func, method='nearest').to_masked_array(),
-                                 structure=structure, function=np.nanargmin,
-                                 dtype=np.uint8)
+    if low_memory:
+        min_convolve = flow_convolve(get_flow_stack(xr.DataArray(field, dims=('t','y','x')),
+                                     flow_func, method='nearest').to_masked_array(),
+                                     structure=structure, function=np.nanargmin,
+                                     dtype=np.uint8)
+    else:
+        min_convolve = flow_convolve(field_stack,
+                                     structure=structure, function=np.nanargmin,
+                                     dtype=np.uint8)
     min_convolve = np.minimum(np.maximum(min_convolve, 0), np.sum(structure!=0).astype(np.uint8)-1)
     # inds_convolve = flow_convolve(ind_stack, structure=structure)
     # inds_convolve.mask = np.logical_or(inds_convolve.mask, inds_convolve<0)
@@ -466,11 +521,15 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
             output = np.nanmin(temp, axis)
             counter[0]+=1
             return output
-        min_edge = flow_convolve(get_flow_stack(xr.DataArray(field, dims=('t','y','x')),
-                                 flow_func, method='nearest').to_masked_array(),
-                                 structure=structure, function=min_edge_func,
-                                 dtype=np.float32)
-
+        # if low_memory:
+        #     min_edge = flow_convolve(get_flow_stack(xr.DataArray(field, dims=('t','y','x')),
+        #                              flow_func, method='nearest').to_masked_array(),
+        #                              structure=structure, function=min_edge_func,
+        #                              dtype=np.float32)
+        # else:
+        #     min_edge = flow_convolve(field_stack,
+        #                              structure=structure, function=min_edge_func,
+        #                              dtype=np.float32)
         # Function to find the offset of the minimum neighbour with a different label
         def argmin_edge_func(temp, axis, counter=[0]):
             fill_wh = flow_convolve(temp_fill[:,counter[0]].reshape((3,1)+fill.shape[1:]),
@@ -480,10 +539,17 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
             output = np.nanargmin(temp, axis)
             counter[0]+=1
             return output
-        argmin_edge = flow_convolve(get_flow_stack(xr.DataArray(field, dims=('t','y','x')),
-                                    flow_func, method='nearest').to_masked_array(),
-                                    structure=structure, function=argmin_edge_func,
-                                    dtype=np.uint8)
+        if low_memory:
+            min_edge, argmin_edge = flow_convolve(get_flow_stack(xr.DataArray(field, dims=('t','y','x')),
+                                        flow_func, method='nearest').to_masked_array(),
+                                        structure=structure,
+                                        function=[min_edge_func, argmin_edge_func],
+                                        dtype=np.uint8)
+        else:
+            min_edge, argmin_edge = flow_convolve(field_stack,
+                                        structure=structure,
+                                        function=(min_edge_func, argmin_edge_func),
+                                        dtype=np.uint8)
 
         def min_inds_func(inds_convolve, axis, counter=[0]):
             inds_convolve.mask = np.logical_or(inds_convolve.mask, inds_convolve<0)
@@ -500,21 +566,42 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
                                   dtype=inds_dtype)
 
         # inds_edge = inds_convolve[tuple([argmin_edge.data.astype(int)]+np.meshgrid(*(range(s) for s in inds.shape), indexing='ij'))].astype(int)
+        # Old, slow method
+        # object_slices=ndi.find_objects(np.maximum(fill,0))
+        # for j in range(max_markers, len(object_slices)):
+        #     if object_slices[j] is not None:
+        #         wh = fill[object_slices[j]]==j+1
+        #         argmin = np.maximum(np.minimum(np.nanargmin(np.maximum(min_edge, field)[object_slices[j]][wh]),
+        #                                        np.sum(wh)), 0).astype(inds_dtype)
+        #         try:
+        #             new_label = fill.ravel()[inds_edge[object_slices[j]][wh][argmin]]
+        #         except:
+        #             if debug_mode:
+        #                 print('Failed to assign new_label, label:',j+1)
+        #             new_label = -1
+        #         if new_label<=j:
+        #             fill[object_slices[j]][wh] = new_label
 
-        object_slices=ndi.find_objects(np.maximum(fill,0))
-        for j in range(max_markers, len(object_slices)):
-            if object_slices[j] is not None:
-                wh = fill[object_slices[j]]==j+1
-                argmin = np.maximum(np.minimum(np.nanargmin(np.maximum(min_edge, field)[object_slices[j]][wh]),
-                                               np.sum(wh)), 0).astype(inds_dtype)
-                try:
-                    new_label = fill.ravel()[inds_edge[object_slices[j]][wh][argmin]]
-                except:
-                    if debug_mode:
-                        print('Failed to assign new_label, label:',j+1)
-                    new_label = -1
-                if new_label<=j:
-                    fill[object_slices[j]][wh] = new_label
+        # New method using bincount and argsort:
+        region_bins = np.nancumsum(np.bincount(np.maximum(fill,0).ravel()+1))
+        region_inds = np.argsort(np.maximum(fill,0).ravel())
+        def get_new_label(j):
+            wh = region_inds[region_bins[j]:region_bins[j+1]]
+            try:
+                return fill.ravel()[inds_edge.ravel()[wh][np.nanargmin(np.maximum(min_edge.ravel()[wh], field.ravel()[wh]))]]
+            except:
+                return 0
+        new_label = np.array([np.maximum(get_new_label(k),0) for k in range(fill.max()+1)], dtype=int)
+        for jiter in range(1,max_iter+1):
+            wh = new_label[max_markers+1:]>max_markers
+            new = np.minimum(new_label, new_label[new_label])[max_markers+1:][wh]
+            if np.all(new_label[max_markers+1:][wh]==new):
+                break
+            else:
+                new_label[max_markers+1:][wh] = new
+        for k in range(max_markers+1, fill.max()+1):
+            if region_bins[k]<region_bins[k+1]:
+                fill.ravel()[region_inds[region_bins[k]:region_bins[k+1]]] = new_label[k]
         if debug_mode:
             print("Iteration:", iter)
             print("Remaining labels:", np.unique(fill).size)
