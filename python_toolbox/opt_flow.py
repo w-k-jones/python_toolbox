@@ -380,7 +380,11 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
     if mask is None:
         if debug_mode:
             print("Setting mask to default")
-        mask = np.zeros_like(field)
+        mask = np.zeros_like(field, dtype='bool')
+    if hasattr(field, 'mask'):
+        mask = np.logical_or(mask, field.mask)
+    if np.any(np.isnan(field)):
+        mask = np.logical_or(mask, np.isnan(field))
     if np.any([s != 3 for s in structure.shape]):
         if debug_mode:
             print("Inserting structure into 3x3x3 array")
@@ -503,10 +507,12 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
         if debug_mode:
             print("Some pixels not filled, adding")
         fill[wh] = ndi.label(wh)[0][wh]+np.nanmax(fill)
-
+    # Now we've filled all the values, we change the mask values back to 0 for the next step
+    fill = np.maximum(fill,0)
     # Now overflow watershed basins into neighbouring basins until only marker labels are left
     if debug_mode:
         print("Joining labels")
+        print("max_markers:", max_markers)
     # while np.any(fill>max_markers):
     for iter in range(1, max_iter+1):
         # Make a flow stack using the current fill
@@ -533,6 +539,7 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
                                      structure=structure,
                                      function=[min_edge_func, np.nanargmin],
                                      dtype=np.float32)
+        # Note that we can call nanargmin directly the second time, as the mask changes have already been made by the temporary function
         # Function to find the offset of the minimum neighbour with a different label
         # def argmin_edge_func(temp, axis, counter=[0]):
         #     fill_wh = flow_convolve(temp_fill[:,counter[0]].reshape((3,1)+fill.shape[1:]),
@@ -590,15 +597,18 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
         #             fill[object_slices[j]][wh] = new_label
 
         # New method using bincount and argsort:
-        region_bins = np.nancumsum(np.bincount(np.maximum(fill,0).ravel()+1))
-        region_inds = np.argsort(np.maximum(fill,0).ravel())
+        # We add 1 to the fill so that the first value is 0, this allows to index from i:i+1 for all fill values
+        region_bins = np.nancumsum(np.bincount(fill.ravel()+1))
+        n_bins = region_bins.size-1
+        region_inds = np.argsort(fill.ravel())
         def get_new_label(j):
             wh = region_inds[region_bins[j]:region_bins[j+1]]
+            # Occasionally a region won't be able to find a neighbour, in this case we set it to masked
             try:
                 return fill.ravel()[inds_edge.ravel()[wh][np.nanargmin(np.maximum(min_edge.ravel()[wh], field.ravel()[wh]))]]
             except:
                 return 0
-        new_label = np.array([np.maximum(get_new_label(k),0) for k in range(fill.max()+1)], dtype=int)
+        new_label = np.array([np.maximum(get_new_label(k),0) for k in range(n_bins)], dtype=int)
         for jiter in range(1,max_iter+1):
             wh = new_label[max_markers+1:]>max_markers
             new = np.minimum(new_label, new_label[new_label])[max_markers+1:][wh]
@@ -606,12 +616,19 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
                 break
             else:
                 new_label[max_markers+1:][wh] = new
-        for k in range(max_markers+1, fill.max()+1):
+        for k in range(max_markers+1, n_bins):
             if region_bins[k]<region_bins[k+1]:
                 fill.ravel()[region_inds[region_bins[k]:region_bins[k+1]]] = new_label[k]
         if debug_mode:
             print("Iteration:", iter)
             print("Remaining labels:", np.unique(fill).size)
+            print("Max label:", np.nanmax(fill))
+            if np.unique(fill).size<=10:
+                print("Labels:", np.unique(fill))
+                print("New:", new_label[np.maximum(0,np.unique(fill).astype(int))])
+            else:
+                print("Labels:", np.unique(fill)[:10])
+                print("New:", new_label[np.maximum(0,np.unique(fill).astype(int)[:10])])
         if np.nanmax(fill)<=max_markers:
             break
     return fill
