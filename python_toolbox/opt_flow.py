@@ -513,7 +513,9 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
     if debug_mode:
         print("Joining labels")
         print("max_markers:", max_markers)
-    # while np.any(fill>max_markers):
+    # we can set the middle value of the structure to 0 as we are only interested in the surrounding pixels
+    new_struct = structure.copy()
+    new_struct[1,1] = 0
     for iter in range(1, max_iter+1):
         # Make a flow stack using the current fill
         temp_fill = get_flow_stack(xr.DataArray(fill, dims=('t','y','x')),
@@ -522,7 +524,7 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
         # Function to find the minimum neighbour value with a different label
         def min_edge_func(temp, axis, counter=[0]):
             fill_wh = flow_convolve(temp_fill[:,counter[0]].reshape((3,1)+fill.shape[1:]),
-                                                   structure=structure) == fill[counter[0]]
+                                                   structure=new_struct) == fill[counter[0]]
             fill_wh_mask = np.logical_or(fill_wh.data, fill_wh.mask)
             temp.mask = np.logical_or(temp.mask, fill_wh_mask.squeeze())
             output = np.nanmin(temp, axis)
@@ -531,12 +533,12 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
         if low_memory:
             min_edge, argmin_edge = flow_convolve(get_flow_stack(xr.DataArray(field, dims=('t','y','x')),
                                      flow_func, method='nearest').to_masked_array(),
-                                     structure=structure,
+                                     structure=new_struct,
                                      function=[min_edge_func, np.nanargmin],
                                      dtype=np.float32)
         else:
             min_edge, argmin_edge = flow_convolve(field_stack,
-                                     structure=structure,
+                                     structure=new_struct,
                                      function=[min_edge_func, np.nanargmin],
                                      dtype=np.float32)
         # Note that we can call nanargmin directly the second time, as the mask changes have already been made by the temporary function
@@ -573,11 +575,11 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
         if low_memory:
             inds_edge = flow_convolve(get_flow_stack(xr.DataArray(inds, dims=('t','y','x')),
                                       flow_func, method='nearest').to_masked_array(),
-                                      structure=structure, function=min_inds_func,
+                                      structure=new_struct, function=min_inds_func,
                                       dtype=inds_dtype)
         else:
             inds_edge = flow_convolve(ind_stack,
-                                      structure=structure, function=min_inds_func,
+                                      structure=new_struct, function=min_inds_func,
                                       dtype=inds_dtype)
         # inds_edge = inds_convolve[tuple([argmin_edge.data.astype(int)]+np.meshgrid(*(range(s) for s in inds.shape), indexing='ij'))].astype(int)
         # Old, slow method
