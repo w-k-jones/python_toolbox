@@ -86,10 +86,10 @@ def get_abi_pixel_lengths(dataset, dtype=None):
     if dtype == None:
         dtype = dataset.dtype
     g = Geod(ellps='WGS84')
-    lats, lons = get_abi_lat_lon(dataset)
+    lat, lon = get_abi_lat_lon(dataset)
     dy, dx = np.zeros(lat.shape, dtype=dtype), np.zeros(lat.shape, dtype=dtype)
-    dy[:-1] = ellps.inv(lon[:-1],lat[:-1],lon[1:],lat[1:])[-1]/1e3
-    dx[:,:-1] = ellps.inv(lon[:,:-1],lat[:,:-1],lon[:,1:],lat[:,1:])[-1]/1e3
+    dy[:-1] = g.inv(lon[:-1],lat[:-1],lon[1:],lat[1:])[-1]/1e3
+    dx[:,:-1] = g.inv(lon[:,:-1],lat[:,:-1],lon[:,1:],lat[:,1:])[-1]/1e3
     dy[1:]+=dy[:-1]
     dy[1:-1]/=2
     dx[:,1:]+=dx[:,:-1]
