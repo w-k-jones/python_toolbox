@@ -7,7 +7,7 @@ from scipy.signal import convolve
 import cartopy.crs as ccrs
 import matplotlib.pyplot as plt
 from mpl_toolkits.basemap import Basemap
-from pyproj import Proj
+from pyproj import Proj, Geod
 import cv2 as cv
 from dateutil.parser import parse as parse_date
 from .dataset_tools import get_ds_area_mean, match_coords, ds_area_func
@@ -79,15 +79,34 @@ def get_abi_lat_lon(dataset, dtype=None):
     lats[lats>=1E30] = np.nan
     return lats, lons
 
+def get_abi_pixel_lengths(dataset, dtype=None):
+    """
+    Returns the length scales in x and y of each pixel in the input dataset
+    """
+    if dtype == None:
+        dtype = dataset.dtype
+    g = Geod(ellps='WGS84')
+    lats, lons = get_abi_lat_lon(dataset)
+    dy, dx = np.zeros(lat.shape, dtype=dtype), np.zeros(lat.shape, dtype=dtype)
+    dy[:-1] = ellps.inv(lon[:-1],lat[:-1],lon[1:],lat[1:])[-1]/1e3
+    dx[:,:-1] = ellps.inv(lon[:,:-1],lat[:,:-1],lon[:,1:],lat[:,1:])[-1]/1e3
+    dy[1:]+=dy[:-1]
+    dy[1:-1]/=2
+    dx[:,1:]+=dx[:,:-1]
+    dx[:,1:-1]/=2
+    return dx, dy
+
 def get_abi_pixel_area(dataset, dtype=None):
     if dtype == None:
         dtype = dataset.dtype
-    lat, lon = get_abi_lat_lon(dataset, dtype=dtype)
-    nadir_res = np.array([dataset.spatial_resolution.split('km')[0]]).astype(dtype)
-    xx, yy = np.meshgrid(dataset.astype(dtype).x.data, dataset.astype(dtype).y.data)
-    lx_factor = np.cos(np.abs(np.radians(dataset.goes_imager_projection.longitude_of_projection_origin-lon))+np.abs(xx))
-    ly_factor = np.cos(np.abs(np.radians(dataset.goes_imager_projection.latitude_of_projection_origin-lat))+np.abs(yy))
-    area = nadir_res**2/(lx_factor*ly_factor)
+    # lat, lon = get_abi_lat_lon(dataset, dtype=dtype)
+    # nadir_res = np.array([dataset.spatial_resolution.split('km')[0]]).astype(dtype)
+    # xx, yy = np.meshgrid(dataset.astype(dtype).x.data, dataset.astype(dtype).y.data)
+    # lx_factor = np.cos(np.abs(np.radians(dataset.goes_imager_projection.longitude_of_projection_origin-lon))+np.abs(xx))
+    # ly_factor = np.cos(np.abs(np.radians(dataset.goes_imager_projection.latitude_of_projection_origin-lat))+np.abs(yy))
+    # area = nadir_res**2/(lx_factor*ly_factor)
+    dx, dy = get_abi_pixel_lengths(dataset, dtype=dtype)
+    area = dx*dy
     return area
 
 def get_abi_ref(dataset, check=False, dtype=None):
@@ -118,20 +137,25 @@ def get_abi_ds_from_files(filenames, check=False, dtype=None):
             channel = ds.band_id.data[0]
             wavelength = ds.band_wavelength.data[0]
             if channel<7:
-                return get_abi_ref(ds, dtype=dtype)
+                DataArray = get_abi_ref(ds, dtype=dtype)
             else:
-                return get_abi_IR(ds, dtype=dtype)
+                DataArray = get_abi_IR(ds, dtype=dtype)
     elif hasattr(filenames, '__iter__'):
         with xr.open_mfdataset(filenames, combine='nested', concat_dim='t') as ds:
             channel = ds.band_id.data[0]
             wavelength = ds.band_wavelength.data[0]
             if channel<7:
-                return get_abi_ref(ds, dtype=dtype)
+                DataArray = get_abi_ref(ds, dtype=dtype)
             else:
-                return get_abi_IR(ds, dtype=dtype)
+                DataArray = get_abi_IR(ds, dtype=dtype)
     else:
         raise ValueError("""Error in 'get_abi_ds_from_files: filenames input must be either a string
                             or a list of strings'""")
+    DataArray.attrs['goes_imager_projection'] = ds.goes_imager_projection
+    DataArray.attrs['band_id'] = ds.band_id
+    DataArray.attrs['band_wavelength'] = ds.band_wavelength
+    return DataArray
+
 
 def plot_goes_file(filename):
     date = get_abi_date_from_filename(filename)
