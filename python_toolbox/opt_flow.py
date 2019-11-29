@@ -456,6 +456,7 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
     # iter_converge = np.zeros(inds_neighbour.shape, np.uint8)
     # ind_converge = np.zeros(inds_neighbour.shape, inds_dtype)
     # fill_markers = markers.astype(ind_stack)-mask.astype(int)
+    print(type(markers), markers.dtype)
     max_markers = np.nanmax(markers)
     if debug_mode:
         print("Finding network convergence locations")
