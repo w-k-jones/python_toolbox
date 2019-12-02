@@ -66,12 +66,15 @@ def plot_goes_file(filename):
     plt.title('%s' % date.strftime('%d %B %Y'), loc='right')
     return
 
+def get_abi_proj(dataset):
+    return Proj(proj='geos', h=dataset.goes_imager_projection.perspective_point_height,
+                lon_0=dataset.goes_imager_projection.longitude_of_projection_origin,
+                sweep=dataset.goes_imager_projection.sweep_angle_axis)
+
 def get_abi_lat_lon(dataset, dtype=None):
     if dtype == None:
         dtype = dataset.dtype
-    p = Proj(proj='geos', h=dataset.goes_imager_projection.perspective_point_height,
-             lon_0=dataset.goes_imager_projection.longitude_of_projection_origin,
-             sweep=dataset.goes_imager_projection.sweep_angle_axis)
+    p = get_abi_proj(dataset)
     xx, yy = np.meshgrid((dataset.x.data*dataset.goes_imager_projection.perspective_point_height).astype(dtype),
                          (dataset.y.data*dataset.goes_imager_projection.perspective_point_height).astype(dtype))
     lons, lats = p(xx, yy, inverse=True)
