@@ -1,7 +1,7 @@
 from setuptools import setup
 
 setup(name='python toolbox',
-      version='0.2.20  ',
+      version='0.2.22  ',
       description='Set of modules for analysis',
       url='',
       author='William Jones',

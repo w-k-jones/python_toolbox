@@ -608,10 +608,22 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
             wh = region_inds[region_bins[j]:region_bins[j+1]]
             # Occasionally a region won't be able to find a neighbour, in this case we set it to masked
             try:
-                return fill.ravel()[inds_edge.ravel()[wh][np.nanargmin(np.maximum(min_edge.ravel()[wh], field.ravel()[wh]))]]
+                output = fill.ravel()[inds_edge.ravel()[wh][np.nanargmin(np.maximum(min_edge.ravel()[wh], field.ravel()[wh]))]]
             except:
                 return 0
-        new_label = np.array([np.maximum(get_new_label(k),0) for k in range(n_bins)], dtype=int)
+            # Now need to check if output is masked
+            if (type(output) is ma.MaskedArray and output.mask):
+                return 0
+            else:
+                output = output.item()
+            # and check if nan
+            if np.all(np.isfinite(output)):
+                return output
+            else:
+                return 0
+        new_label = ma.array([get_new_label(k) for k in range(n_bins)]).astype(int)
+        new_label.fill_value=0
+        new_label=new_label.filled()
         for jiter in range(1,max_iter+1):
             wh = new_label[max_markers+1:]>max_markers
             new = np.minimum(new_label, new_label[new_label])[max_markers+1:][wh]
