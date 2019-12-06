@@ -472,9 +472,15 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
     # iter_converge = np.zeros(inds_neighbour.shape, np.uint8)
     # ind_converge = np.zeros(inds_neighbour.shape, inds_dtype)
     # fill_markers = markers.astype(ind_stack)-mask.astype(int)
+    if markers.max()<np.iinfo(np.int16).max:
+        mark_dtype = np.int16
+    elif markers.max()<np.iinfo(np.int32).max:
+        mark_dtype = np.int32
+    else:
+        mark_dtype = np.int64
     fill_markers = (markers.astype(mark_dtype)-mask.astype(mark_dtype))
     wh_local_min = np.logical_and(inds_neighbour==inds, fill_markers==0)
-    wh_markers = np.logical_or(wh_local_min, fill_markers!=0))
+    wh_markers = np.logical_or(wh_local_min, fill_markers!=0)
     wh_to_fill = np.logical_not(wh_markers.copy())
     if debug_mode:
         print("Finding network convergence locations")
@@ -488,7 +494,7 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
             wh_markers[wh_loop] = True
 
         # Now check if any have met a convergence location
-        wh_converge = np.logical_and(wh_to_fill, wh_markers.ravel()[inds_neighbour[wh_to_fill]].ravel())
+        wh_converge = wh_markers.ravel()[inds_neighbour[wh_to_fill]].ravel()
         if np.any(wh_converge):
             wh_to_fill[wh_converge] = False
 
@@ -505,7 +511,7 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
         # if debug_mode:
         #     print("Iteration:", i+1)
         #     print("Pixels converged", np.sum(type_converge!=0))
-        if not np.any(wh_to_fill)):
+        if not np.any(wh_to_fill):
             if debug_mode:
                 print("All pixels converged")
             break
@@ -526,7 +532,7 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
     fill_markers[wh_local_min] = temp_markers
     fill = fill_markers.copy()
     wh = fill==0
-    fill[wh] fill.ravell()[inds_neighbour[wh].ravel()]
+    fill[wh] = fill.ravel()[inds_neighbour[wh].ravel()]
     # fill = fill_markers.ravel()[inds_neighbour.ravel()].reshape(fill_markers.shape)
     del fill_markers, temp_markers, inds_neighbour
     # fill[markers>0]=markers[markers>0]
