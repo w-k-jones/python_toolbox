@@ -369,22 +369,13 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
     if structure is None:
         if debug_mode:
             print("Setting structure to default")
-        structure = np.ones([3,3,3], 'bool')
-        structure[0,0,0], structure[0,0,-1], structure[0,-1,0], structure[0,-1,-1], structure[-1,0,0], structure[-1,0,-1], structure[-1,-1,0], structure[-1,-1,-1] = 0,0,0,0,0,0,0,0
+        structure = ndi.generate_binary_structure(3,1)
     if len(structure.shape)<3:
         if debug_mode:
             print("Setting structure to 3d")
         structure = np.atleast_3d(structure)
     if np.any([s not in [1,3] for s in structure.shape]):
         raise Exception("Structure must have a size of 1 or 3 in each dimension")
-    if mask is None:
-        if debug_mode:
-            print("Setting mask to default")
-        mask = np.zeros_like(field, dtype='bool')
-    if hasattr(field, 'mask'):
-        mask = np.logical_or(mask, field.mask)
-    if np.any(np.isnan(field)):
-        mask = np.logical_or(mask, np.isnan(field))
     if np.any([s != 3 for s in structure.shape]):
         if debug_mode:
             print("Inserting structure into 3x3x3 array")
@@ -392,7 +383,31 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
         temp = np.zeros([3,3,3])
         temp[wh] = structure
         structure=temp
+    if isinstance(structure, ma.core.MaskedArray):
+        structure = structure.filled(fill_value=0)
     structure = structure.astype('bool')
+
+    # Check mask input
+    if mask is None:
+        if debug_mode:
+            print("Setting mask to default")
+        mask = np.zeros_like(field, dtype='bool')
+    if isinstance(mask, ma.core.MaskedArray):
+        mask = mask.filled(fill_value=True)
+
+    # Check markers input
+    if isinstance(markers, ma.core.MaskedArray):
+        markers = markers.filled(fill_value=False)
+
+    # Check field input
+    if isinstance(field, ma.core.MaskedArray):
+        field = field.filled(fill_value=np.nanmax(field))
+    wh = np.isnan(field)
+    if np.any(wh):
+        field[wh] = np.nanmax(field)
+        mask[wh] = True
+        markers[wh] = False
+
     # Get ravelled indices for each pixel in the field, and find nearest neighbours using flow field
     # Set inds dtype to minimum possible to contain all values to save memory
     if field.size<np.iinfo(np.uint16).max:
@@ -449,38 +464,48 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
     wh = np.logical_or(np.logical_or(inds_neighbour.data<0, inds_neighbour.data>inds.max()), inds_neighbour.mask)
     if np.any(wh):
         inds_neighbour.data[wh] = inds[wh]
-    inds_neighbour.fill_value=0
+    # inds_neighbour.fill_value=0
+    inds_neighbour = inds_neighbour.data.astype(inds_dtype)
     # Now iterate over neighbour network to find minimum convergence point for each pixel
         # Each pixel will either reach a minimum or loop back to itself
-    type_converge = np.zeros(inds_neighbour.shape, np.uint8)
+    # type_converge = np.zeros(inds_neighbour.shape, np.uint8)
     # iter_converge = np.zeros(inds_neighbour.shape, np.uint8)
     # ind_converge = np.zeros(inds_neighbour.shape, inds_dtype)
     # fill_markers = markers.astype(ind_stack)-mask.astype(int)
-    print(type(markers), markers.dtype)
-    max_markers = np.nanmax(markers)
+    fill_markers = (markers.astype(mark_dtype)-mask.astype(mark_dtype))
+    wh_local_min = np.logical_and(inds_neighbour==inds, fill_markers==0)
+    wh_markers = np.logical_or(wh_local_min, fill_markers!=0))
+    wh_to_fill = np.logical_not(wh_markers.copy())
     if debug_mode:
         print("Finding network convergence locations")
     for i in range(max_iter):
-        old_neighbour, inds_neighbour = inds_neighbour.copy(), inds_neighbour.ravel()[inds_neighbour.ravel()].reshape(inds_neighbour.shape)
-        # wh_mark = np.logical_and(type_converge==0, fill_markers.ravel()[inds_neighbour.ravel().reshape(fill_markers.shape)]!=0)
-        # if np.any(wh_mark):
-        #     type_converge[wh_mark] = 3
-        #     iter_converge[wh_mark] = i
-        #     ind_converge[wh_mark] = inds_neighbour[wh_mark]
-        wh_ind = np.logical_and(type_converge==0, inds_neighbour==inds)
-        if np.any(wh_ind):
-            type_converge[wh_ind] = 1
-            # iter_converge[wh_ind] = i
-            # ind_converge[wh_ind] = inds_neighbour[wh_ind]
-        wh_conv = np.logical_and(type_converge==0, inds_neighbour==old_neighbour)
-        if np.any(wh_conv):
-            type_converge[wh_conv] = 2
-            # iter_converge[wh_conv] = i
-            # ind_converge[wh_ind] = inds_neighbour[wh_ind]
-        if debug_mode:
-            print("Iteration:", i+1)
-            print("Pixels converged", np.sum(type_converge!=0))
-        if np.all(type_converge!=0):
+        old_neighbour, inds_neighbour[wh_to_fill] = inds_neighbour.copy(), inds_neighbour.ravel()[inds_neighbour[wh_to_fill].ravel()]
+        # Check if any pixels have looped back to their original location
+        wh_loop = np.logical_and(wh_to_fill, inds_neighbour==inds)
+        if np.any(wh_loop):
+            wh_to_fill[wh_loop] = False
+            wh_converge[wh_loop] = True
+            wh_markers[wh_loop] = True
+
+        # Now check if any have met a convergence location
+        wh_converge = np.logical_and(wh_to_fill, wh_markers.ravel()[inds_neighbour[wh_to_fill]].ravel())
+        if np.any(wh_converge):
+            wh_to_fill[wh_converge] = False
+
+        # wh_ind = np.logical_and(type_converge==0, inds_neighbour==inds)
+        # if np.any(wh_ind):
+        #     type_converge[wh_ind] = 1
+        #     # iter_converge[wh_ind] = i
+        #     # ind_converge[wh_ind] = inds_neighbour[wh_ind]
+        # wh_conv = np.logical_and(type_converge==0, inds_neighbour==old_neighbour)
+        # if np.any(wh_conv):
+        #     type_converge[wh_conv] = 2
+        #     # iter_converge[wh_conv] = i
+        #     # ind_converge[wh_ind] = inds_neighbour[wh_ind]
+        # if debug_mode:
+        #     print("Iteration:", i+1)
+        #     print("Pixels converged", np.sum(type_converge!=0))
+        if not np.any(wh_to_fill)):
             if debug_mode:
                 print("All pixels converged")
             break
@@ -488,28 +513,34 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
     # Use converged locations to fill watershed basins
     if debug_mode:
         print("Filling basins")
-    wh = np.logical_and(type_converge==1, np.logical_not(np.logical_xor(markers!=0, mask)))
-    temp_markers = ndi.label(wh)[0][wh]+max_markers
+    # wh = np.logical_and(type_converge==1, np.logical_not(np.logical_xor(markers!=0, mask)))
+    max_markers = np.nanmax(markers)
+    temp_markers = ndi.label(wh_local_min)[0][wh_local_min]+max_markers
     if temp_markers.max()<np.iinfo(np.int16).max:
         mark_dtype = np.int16
     elif temp_markers.max()<np.iinfo(np.int32).max:
         mark_dtype = np.int32
     else:
         mark_dtype = np.int64
-    fill_markers = (markers.astype(mark_dtype)-mask.astype(mark_dtype))
-    fill_markers[wh] = temp_markers
-    # fill = fill_markers.ravel()[ind_converge.ravel()].reshape(fill_markers.shape)
-    fill = fill_markers.ravel()[inds_neighbour.ravel()].reshape(fill_markers.shape)
-    del fill_markers, temp_markers, type_converge, inds_neighbour
-    fill[markers>0]=markers[markers>0]
-    fill[mask]=-1
+    fill_markers = fill_markers.astype(mark_dtype)
+    fill_markers[wh_local_min] = temp_markers
+    fill = fill_markers.copy()
+    wh = fill==0
+    fill[wh] fill.ravell()[inds_neighbour[wh].ravel()]
+    # fill = fill_markers.ravel()[inds_neighbour.ravel()].reshape(fill_markers.shape)
+    del fill_markers, temp_markers, inds_neighbour
+    # fill[markers>0]=markers[markers>0]
+    # fill[mask]=-1
     wh = fill==0
     if np.any(wh):
         if debug_mode:
             print("Some pixels not filled, adding")
         fill[wh] = ndi.label(wh)[0][wh]+np.nanmax(fill)
     # Now we've filled all the values, we change the mask values back to 0 for the next step
-    fill = np.maximum(fill,0)
+    if isinstance(fill, ma.core.MaskedArray):
+        fill = np.maximum(fill.filled(fill_value=0),0)
+    else:
+        fill = np.maximum(fill, 0)
     # Now overflow watershed basins into neighbouring basins until only marker labels are left
     if debug_mode:
         print("Joining labels")
