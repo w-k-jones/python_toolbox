@@ -180,6 +180,94 @@ def flow_convolve(flow_data, structure=None, wrap=False, function=None, dtype=No
             output[:,i] = temp
     return output
 
+def flow_convolve_nearest(data, flow_func, structure=None, wrap=False, function=None, dtype=None, **kwargs):
+    """
+    A function to compute a Semi-Lagrangian convolution using the nearest neighbour method. This can be performed
+    faster as no interpolation is required.
+    Input:
+        data:
+            An n-dimensional array or array-like input of values to perform the convolution on
+        flow_func:
+            A lambda function that returns the flow vectors of the data field in n-1 dimensions
+
+    Output:
+        convolve_data:
+            An output array of convoluted data. If not function keyword is provided, this will be an n+1
+            dimension array, where the leading dimension is the same length as the number of non-zero values
+            in the provided structure, and the remaining dimensions of the same size as the data input.
+            If the function keyword is defined, this will be an array of the same shape as the input data
+
+    Optional:
+        structure:
+            An array-like structure to apply to the convolution. By default this is set to square connectivity.
+            This must have n or fewer dimensions, and each dimension length must be 3 or 1. The value of the
+            convolution output will be multiplied by the correspinding structure values.
+        wrap:
+            If true then any points in the convolution which exceed the limits of the relevant dimenion will be
+            wrapped around to the other side of the array. Otherwise these points will be masked. Defualts to False
+        function:
+            A function to apply to the convoluted data along to convolution dimension. This function must have an
+            axis keyword, will will be set to 0
+        dtype:
+            Data type of the returned array. Defaults to the dtype of the input data
+        **kwargs:
+            Keywords passed to any function called by the function keyword.
+    """
+    if dtype == None:
+        dtype = data.dtype
+    n_dims = len(data.shape)
+    assert(n_dims > 1)
+
+    if structure is None:
+        structure = ndi.generate_binary_structure(n_dims,1)
+    if hasattr(structure, "shape"):
+        if len(structure.shape) > n_dims:
+            raise ValueError("Input structure has too many dimensions")
+        for s in structure.shape:
+            if s not in [1,3]:
+                raise ValueError("structure input must be an array with dimensions of length 1 or 3")
+        if len(structure.shape) < n_dims:
+            nd_diff = n_dims - len(structure.shape)
+            structure = structure.reshape((1,)*nd_diff+structure.shape)
+    else:
+        raise ValueError("""structure input must be an array-like object""")
+
+    structure_offsets = [arr.reshape((-1,)+(1,)*len(data.shape))-1 for arr in np.where(structure!=0)]
+
+    structure_factor = structure[structure!=0].reshape((-1,)+(1,)*len(data.shape))
+
+    n_elements = np.sum(structure!=0)
+
+    shape_ranges = [np.arange(s).reshape(np.roll((-1,)+(1,)*(len(data.shape)-1), i))
+                    for i, s in enumerate(data.shape)]
+
+    flow_inds = [np.round(arr).astype(int)+shape_ranges[-1-i]+structure_offsets[-1-i] for i, arr in enumerate(flow_func(structure_offsets[0]))]
+
+    ravelled_index = np.ravel_multi_index([(shape_ranges[0]+structure_offsets[0])%data.shape[0]] +
+                                          [fi%data.shape[i+1]
+                                           for i, fi in enumerate(flow_inds[::-1])],
+                                          data.shape).ravel()
+
+    if function is None:
+        if wrap:
+            return (data.ravel()[ravelled_index].reshape((n_elements,)+data.shape) * structure_factor).astype(dtype)
+        else:
+            mask = np.logical_or((shape_ranges[0]+structure_offsets[0])%data.shape[0]
+                                  != (shape_ranges[0]+structure_offsets[0]),
+                                 np.any([fi%data.shape[i+1] != fi for i, fi in enumerate(flow_inds[::-1])], axis=0))
+            return ma.array(data.ravel()[ravelled_index].reshape((n_elements,)+data.shape) * structure_factor,
+                            mask=mask, dtype=dtype)
+    else:
+        if wrap:
+            return (function(data.ravel()[ravelled_index].reshape((n_elements,)+data.shape) * structure_factor,
+                            0, **kwargs)).astype(dtype)
+        else:
+            mask = np.logical_or((shape_ranges[0]+structure_offsets[0])%data.shape[0]
+                                  != (shape_ranges[0]+structure_offsets[0]),
+                                 np.any([fi%data.shape[i+1] != fi for i, fi in enumerate(flow_inds[::-1])], axis=0))
+            return function(ma.array(data.ravel()[ravelled_index].reshape((n_elements,)+data.shape) * structure_factor,
+                            mask=mask, dtype=dtype), 0, **kwargs)
+
 def flow_local_min(flow_stack, structure=None, ignore_nan=False):
     if structure is not None:
         mp = structure.size//2
@@ -484,19 +572,24 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
     wh_to_fill = np.logical_not(wh_markers.copy())
     if debug_mode:
         print("Finding network convergence locations")
+        print("Pixels to fill:", np.sum(wh_to_fill))
     for i in range(max_iter):
-        old_neighbour, inds_neighbour[wh_to_fill] = inds_neighbour.copy(), inds_neighbour.ravel()[inds_neighbour[wh_to_fill].ravel()]
+        inds_neighbour[wh_to_fill] = inds_neighbour.ravel()[inds_neighbour[wh_to_fill].ravel()]
         # Check if any pixels have looped back to their original location
         wh_loop = np.logical_and(wh_to_fill, inds_neighbour==inds)
         if np.any(wh_loop):
+            if debug_mode:
+                print('Loop')
             wh_to_fill[wh_loop] = False
-            wh_converge[wh_loop] = True
+            wh_local_min[wh_loop] = True
             wh_markers[wh_loop] = True
 
         # Now check if any have met a convergence location
         wh_converge = wh_markers.ravel()[inds_neighbour[wh_to_fill]].ravel()
         if np.any(wh_converge):
-            wh_to_fill[wh_converge] = False
+            if debug_mode:
+                print('Convergence')
+            wh_to_fill[wh_to_fill] = np.logical_not(wh_converge)
 
         # wh_ind = np.logical_and(type_converge==0, inds_neighbour==inds)
         # if np.any(wh_ind):
@@ -508,14 +601,14 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
         #     type_converge[wh_conv] = 2
         #     # iter_converge[wh_conv] = i
         #     # ind_converge[wh_ind] = inds_neighbour[wh_ind]
-        # if debug_mode:
-        #     print("Iteration:", i+1)
-        #     print("Pixels converged", np.sum(type_converge!=0))
+        if debug_mode:
+            print("Iteration:", i+1)
+            print("Pixels converged", np.sum(np.logical_not(wh_to_fill)))
         if not np.any(wh_to_fill):
             if debug_mode:
                 print("All pixels converged")
             break
-    del old_neighbour
+    # del old_neighbour
     # Use converged locations to fill watershed basins
     if debug_mode:
         print("Filling basins")
@@ -550,7 +643,8 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
     # Now overflow watershed basins into neighbouring basins until only marker labels are left
     if debug_mode:
         print("Joining labels")
-        print("max_markers:", max_markers)
+        print("Max label:", np.nanmax(fill))
+        print("max_markers:", max_markers.astype(int))
     # we can set the middle value of the structure to 0 as we are only interested in the surrounding pixels
     new_struct = structure.copy()
     new_struct[1,1] = 0
@@ -674,13 +768,13 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
         if debug_mode:
             print("Iteration:", iter)
             print("Remaining labels:", np.unique(fill).size)
-            print("Max label:", np.nanmax(fill))
-            if np.unique(fill).size<=10:
-                print("Labels:", np.unique(fill))
-                print("New:", new_label[np.maximum(0,np.unique(fill).astype(int))])
-            else:
-                print("Labels:", np.unique(fill)[:10])
-                print("New:", new_label[np.maximum(0,np.unique(fill).astype(int)[:10])])
+            # print("Max label:", np.nanmax(fill))
+            # if np.unique(fill).size<=10:
+            #     print("Labels:", np.unique(fill))
+            #     print("New:", new_label[np.maximum(0,np.unique(fill).astype(int))])
+            # else:
+            #     print("Labels:", np.unique(fill)[:10])
+            #     print("New:", new_label[np.maximum(0,np.unique(fill).astype(int)[:10])])
         if np.nanmax(fill)<=max_markers:
             break
     return fill
