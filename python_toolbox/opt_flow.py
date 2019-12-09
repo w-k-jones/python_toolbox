@@ -505,48 +505,60 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
     else:
         inds_dtype = np.uint64
     inds = np.arange(field.size, dtype=inds_dtype).reshape(field.shape)
-    if not low_memory:
-        if debug_mode:
-            print("Calculating field stack")
-        field_stack = get_flow_stack(xr.DataArray(field, dims=('t','y','x')),
-                                     flow_func, method='nearest').to_masked_array()
-        if debug_mode:
-            print("Calculating indices stack")
-        ind_stack = get_flow_stack(xr.DataArray(inds, dims=('t','y','x')),
-                               flow_func, method='nearest').to_masked_array()
+    # if not low_memory:
+    #     if debug_mode:
+    #         print("Calculating field stack")
+    #     field_stack = get_flow_stack(xr.DataArray(field, dims=('t','y','x')),
+    #                                  flow_func, method='nearest').to_masked_array()
+    #     if debug_mode:
+    #         print("Calculating indices stack")
+    #     ind_stack = get_flow_stack(xr.DataArray(inds, dims=('t','y','x')),
+    #                            flow_func, method='nearest').to_masked_array()
     # Find index of the smallest neighbour to each pixel in the field
     if debug_mode:
         print("Calculating nearest neighbours")
-    if low_memory:
-        min_convolve = flow_convolve(get_flow_stack(xr.DataArray(field, dims=('t','y','x')),
-                                     flow_func, method='nearest').to_masked_array(),
-                                     structure=structure, function=np.nanargmin,
-                                     dtype=np.uint8)
-    else:
-        min_convolve = flow_convolve(field_stack,
-                                     structure=structure, function=np.nanargmin,
-                                     dtype=np.uint8)
+    # if low_memory:
+    #     min_convolve = flow_convolve(get_flow_stack(xr.DataArray(field, dims=('t','y','x')),
+    #                                  flow_func, method='nearest').to_masked_array(),
+    #                                  structure=structure, function=np.nanargmin,
+    #                                  dtype=np.uint8)
+    # else:
+    #     min_convolve = flow_convolve(field_stack,
+    #                                  structure=structure, function=np.nanargmin,
+    #                                  dtype=np.uint8)
+    #
+    # Now using the more efficient flow_convolve_nearest function:
+    min_convolve = flow_convolve_nearest(field, flow_func,
+                                         structure=structure, function=np.nanargmin,
+                                         dtype=np.uint8)
     min_convolve = np.minimum(np.maximum(min_convolve, 0), np.sum(structure!=0).astype(np.uint8)-1)
     # inds_convolve = flow_convolve(ind_stack, structure=structure)
     # inds_convolve.mask = np.logical_or(inds_convolve.mask, inds_convolve<0)
-    def min_inds_func(inds_convolve, axis, counter=[0]):
-        inds_convolve.mask = np.logical_or(inds_convolve.mask, inds_convolve<0)
-        inds_neighbour = inds_convolve[tuple([min_convolve[counter[0]]]
-                                             + np.meshgrid(*(np.arange(s, dtype=inds_dtype)
-                                                             for s in inds.shape[1:]),
-                                             indexing='ij'))]
-        counter[0]+=1
-        return inds_neighbour
+    # def min_inds_func(inds_convolve, axis, counter=[0]):
+    #     inds_convolve.mask = np.logical_or(inds_convolve.mask, inds_convolve<0)
+    #     inds_neighbour = inds_convolve[tuple([min_convolve[counter[0]]]
+    #                                          + np.meshgrid(*(np.arange(s, dtype=inds_dtype)
+    #                                                          for s in inds.shape[1:]),
+    #                                          indexing='ij'))]
+    #     counter[0]+=1
+    #     return inds_neighbour
 
-    if low_memory:
-        inds_neighbour = flow_convolve(get_flow_stack(xr.DataArray(inds, dims=('t','y','x')),
-                                       flow_func, method='nearest').to_masked_array(),
-                                       structure=structure, function=min_inds_func,
-                                       dtype=inds_dtype)
-    else:
-        inds_neighbour = flow_convolve(ind_stack,
-                                       structure=structure, function=min_inds_func,
-                                       dtype=inds_dtype)
+    # if low_memory:
+    #     inds_neighbour = flow_convolve(get_flow_stack(xr.DataArray(inds, dims=('t','y','x')),
+    #                                    flow_func, method='nearest').to_masked_array(),
+    #                                    structure=structure, function=min_inds_func,
+    #                                    dtype=inds_dtype)
+    # else:
+    #     inds_neighbour = flow_convolve(ind_stack,
+    #                                    structure=structure, function=min_inds_func,
+    #                                    dtype=inds_dtype)
+
+    inds_neighbour = flow_convolve_nearest(inds, flow_func,
+                                           structure=structure,
+                                           dtype=inds_dtype)[tuple([min_convolve]
+                                                                    + np.meshgrid(*(np.arange(s, dtype=inds_dtype)
+                                                                                    for s in inds.shape[1:]),
+                                                                    indexing='ij'))]
     del min_convolve
     # inds_neighbour = inds_convolve[tuple([min_convolve.data.astype(int)]+np.meshgrid(*(range(s) for s in inds.shape), indexing='ij'))].astype(int)
     wh = np.logical_or(np.logical_or(inds_neighbour.data<0, inds_neighbour.data>inds.max()), inds_neighbour.mask)
@@ -650,29 +662,38 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
     new_struct[1,1] = 0
     for iter in range(1, max_iter+1):
         # Make a flow stack using the current fill
-        temp_fill = get_flow_stack(xr.DataArray(fill, dims=('t','y','x')),
-                                                flow_func, method='nearest').to_masked_array()
+        # temp_fill = get_flow_stack(xr.DataArray(fill, dims=('t','y','x')),
+        #                                         flow_func, method='nearest').to_masked_array()
 
         # Function to find the minimum neighbour value with a different label
-        def min_edge_func(temp, axis, counter=[0]):
-            fill_wh = flow_convolve(temp_fill[:,counter[0]].reshape((3,1)+fill.shape[1:]),
-                                                   structure=new_struct) == fill[counter[0]]
-            fill_wh_mask = np.logical_or(fill_wh.data, fill_wh.mask)
-            temp.mask = np.logical_or(temp.mask, fill_wh_mask.squeeze())
-            output = np.nanmin(temp, axis)
-            counter[0]+=1
-            return output
-        if low_memory:
-            min_edge, argmin_edge = flow_convolve(get_flow_stack(xr.DataArray(field, dims=('t','y','x')),
-                                     flow_func, method='nearest').to_masked_array(),
-                                     structure=new_struct,
-                                     function=[min_edge_func, np.nanargmin],
-                                     dtype=np.float32)
-        else:
-            min_edge, argmin_edge = flow_convolve(field_stack,
-                                     structure=new_struct,
-                                     function=[min_edge_func, np.nanargmin],
-                                     dtype=np.float32)
+        # def min_edge_func(temp, axis, counter=[0]):
+        #     fill_wh = flow_convolve(temp_fill[:,counter[0]].reshape((3,1)+fill.shape[1:]),
+        #                                            structure=new_struct) == fill[counter[0]]
+        #     fill_wh_mask = np.logical_or(fill_wh.data, fill_wh.mask)
+        #     temp.mask = np.logical_or(temp.mask, fill_wh_mask.squeeze())
+        #     output = np.nanmin(temp, axis)
+        #     counter[0]+=1
+        #     return output
+        # if low_memory:
+        #     min_edge, argmin_edge = flow_convolve(get_flow_stack(xr.DataArray(field, dims=('t','y','x')),
+        #                              flow_func, method='nearest').to_masked_array(),
+        #                              structure=new_struct,
+        #                              function=[min_edge_func, np.nanargmin],
+        #                              dtype=np.float32)
+        # else:
+        #     min_edge, argmin_edge = flow_convolve(field_stack,
+        #                              structure=new_struct,
+        #                              function=[min_edge_func, np.nanargmin],
+        #                              dtype=np.float32)
+
+        field_convolve = flow_convolve_nearest(field, flow_func, structure=new_struct, dtype=np.float32)
+        fill_convolve = flow_convolve_nearest(fill, flow_func, structure=new_struct)
+        field_convolve.mask = np.logical_or(field_convolve.mask, fill_convolve==fill)
+
+        min_edge = np.nanmin(field_convolve, 0)
+        argmin_edge = np.nanargmin(field_convolve, 0, dtype=inds_dtype)
+
+        del fill_convolve, field_convolve
         # Note that we can call nanargmin directly the second time, as the mask changes have already been made by the temporary function
         # Function to find the offset of the minimum neighbour with a different label
         # def argmin_edge_func(temp, axis, counter=[0]):
@@ -695,24 +716,32 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
         #                                 function=argmin_edge_func,
         #                                 dtype=np.uint8)
 
-        def min_inds_func(inds_convolve, axis, counter=[0]):
-            inds_convolve.mask = np.logical_or(inds_convolve.mask, inds_convolve<0)
-            inds_neighbour = inds_convolve[tuple([argmin_edge[counter[0]].data.astype(inds_dtype)]
-                                                 + np.meshgrid(*(np.arange(s, dtype=inds_dtype)
-                                                                 for s in inds.shape[1:]),
-                                                 indexing='ij'))]
-            counter[0]+=1
-            return inds_neighbour
+        # def min_inds_func(inds_convolve, axis, counter=[0]):
+        #     inds_convolve.mask = np.logical_or(inds_convolve.mask, inds_convolve<0)
+        #     inds_neighbour = inds_convolve[tuple([argmin_edge[counter[0]].data.astype(inds_dtype)]
+        #                                          + np.meshgrid(*(np.arange(s, dtype=inds_dtype)
+        #                                                          for s in inds.shape[1:]),
+        #                                          indexing='ij'))]
+        #     counter[0]+=1
+        #     return inds_neighbour
+        #
+        # if low_memory:
+        #     inds_edge = flow_convolve(get_flow_stack(xr.DataArray(inds, dims=('t','y','x')),
+        #                               flow_func, method='nearest').to_masked_array(),
+        #                               structure=new_struct, function=min_inds_func,
+        #                               dtype=inds_dtype)
+        # else:
+        #     inds_edge = flow_convolve(ind_stack,
+        #                               structure=new_struct, function=min_inds_func,
+        #                               dtype=inds_dtype)
 
-        if low_memory:
-            inds_edge = flow_convolve(get_flow_stack(xr.DataArray(inds, dims=('t','y','x')),
-                                      flow_func, method='nearest').to_masked_array(),
-                                      structure=new_struct, function=min_inds_func,
-                                      dtype=inds_dtype)
-        else:
-            inds_edge = flow_convolve(ind_stack,
-                                      structure=new_struct, function=min_inds_func,
-                                      dtype=inds_dtype)
+        inds_neighbour = flow_convolve_nearest(inds, flow_func,
+                                               structure=structure,
+                                               dtype=inds_dtype)[tuple([argmin_edge]
+                                                                        + np.meshgrid(*(np.arange(s, dtype=inds_dtype)
+                                                                                        for s in inds.shape[1:]),
+                                                                        indexing='ij'))]
+
         # inds_edge = inds_convolve[tuple([argmin_edge.data.astype(int)]+np.meshgrid(*(range(s) for s in inds.shape), indexing='ij'))].astype(int)
         # Old, slow method
         # object_slices=ndi.find_objects(np.maximum(fill,0))
