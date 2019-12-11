@@ -23,17 +23,17 @@ def get_ds_flow(da, direction='forwards', pyr_scale=0.5, levels=5, winsize=15, i
         x_flow = xr.zeros_like(da, dtype=dtype).compute()*np.nan
         y_flow = xr.zeros_like(da, dtype=dtype).compute()*np.nan
     if direction == 'forwards':
-        frame1 = ds_to_8bit(da[0]).data.compute()
+        frame1 = ds_to_8bit(da[0]).compute().data
         for i in range(1, da.coords['t'].size):
-            frame0, frame1 = frame1, ds_to_8bit(da[i]).data.compute()
+            frame0, frame1 = frame1, ds_to_8bit(da[i]).compute().data
 
             flow = xr.apply_ufunc(cv.calcOpticalFlowFarneback, frame0, frame1,
                                    None, pyr_scale, levels, winsize, iterations, poly_n, poly_sigma, flags)
             x_flow[i-1], y_flow[i-1] = flow[...,0], flow[...,1]
     elif direction == 'backwards':
-        frame1 = ds_to_8bit(da[-1]).data.compute()
+        frame1 = ds_to_8bit(da[-1]).compute().data
         for i in range(da.coords['t'].size-1, 0, -1):
-            frame0, frame1 = frame1, ds_to_8bit(da[i-1]).data.compute()
+            frame0, frame1 = frame1, ds_to_8bit(da[i-1]).compute().data
 
             flow = xr.apply_ufunc(cv.calcOpticalFlowFarneback, frame0, frame1,
                                    None, pyr_scale, levels, winsize, iterations, poly_n, poly_sigma, flags)
@@ -70,6 +70,20 @@ def get_abi_multispectral_flow(da_list, channels=None, direction='forwards', pyr
                                   coords={'t':x_flow_list[0].t, 'y':x_flow_list[0].y, 'x':x_flow_list[0].x})
     return x_flow_average, y_flow_average
 
+class Flow_Func(object):
+    def __init__(self, flow_x_for, flow_x_back, flow_y_for, flow_y_back):
+        self.flow_x_for = flow_x_for
+        self.flow_y_for = flow_y_for
+        self.flow_x_back = flow_x_back
+        self.flow_y_back = flow_y_back
+
+    def __getitem__(self, items):
+        return Flow_Func(flow_x_for[items], flow_x_back[items], flow_y_for[items], flow_y_back[items])
+
+    def __call__(self, t):
+        return (0.5*t*(t+1)*flow_x_for + 0.5*t*(t-1)*flow_x_back,
+                0.5*t*(t+1)*flow_y_for + 0.5*t*(t-1)*flow_y_back)
+
 def get_flow_func(field, replace_missing=False, **kwargs):
     flow_forward = get_ds_flow(field, **kwargs)
     flow_backward = get_ds_flow(field, direction='backwards', **kwargs)
@@ -82,8 +96,12 @@ def get_flow_func(field, replace_missing=False, **kwargs):
         wh = np.logical_or(np.isnan(flow_backward[0]), np.isnan(flow_backward[1]))
         if np.any(wh):
             flow_backward[wh] = 0
-    return lambda t : (0.5*t*(t+1)*flow_forward[0].to_masked_array() + 0.5*t*(t-1)*flow_backward[0].to_masked_array(),
-                       0.5*t*(t+1)*flow_forward[1].to_masked_array() + 0.5*t*(t-1)*flow_backward[1].to_masked_array())
+
+    flow_x_for = flow_forward[0].to_masked_array()
+    flow_y_for = flow_forward[1].to_masked_array()
+    flow_x_back = flow_backward[0].to_masked_array()
+    flow_y_back = flow_backward[1].to_masked_array()
+    return Flow_Func(flow_x_for, flow_x_back, flow_y_for, flow_y_back)
 
 def interp_flow(da, flow, method='linear'):
     x = np.arange(da.coords['x'].size)
@@ -180,7 +198,7 @@ def flow_convolve(flow_data, structure=None, wrap=False, function=None, dtype=No
             output[:,i] = temp
     return output
 
-def flow_convolve_nearest(data, flow_func, structure=None, wrap=False, function=None, dtype=None, **kwargs):
+def flow_convolve_nearest(data, flow_func, structure=None, wrap=False, function=None, dtype=None, debug=False, **kwargs):
     """
     A function to compute a Semi-Lagrangian convolution using the nearest neighbour method. This can be performed
     faster as no interpolation is required.
@@ -241,32 +259,115 @@ def flow_convolve_nearest(data, flow_func, structure=None, wrap=False, function=
     shape_ranges = [np.arange(s).reshape(np.roll((-1,)+(1,)*(len(data.shape)-1), i))
                     for i, s in enumerate(data.shape)]
 
-    flow_inds = [np.round(arr).astype(int)+shape_ranges[-1-i]+structure_offsets[-1-i] for i, arr in enumerate(flow_func(structure_offsets[0]))]
+    flow_inds = [shape_ranges[i] + structure_offsets[i] for i in range(n_dims)]
 
-    ravelled_index = np.ravel_multi_index([(shape_ranges[0]+structure_offsets[0])%data.shape[0]] +
-                                          [fi%data.shape[i+1]
-                                           for i, fi in enumerate(flow_inds[::-1])],
+#   Now add flow forwards vector
+    wh = structure_offsets[0] == 1
+    if np.any(wh):
+        flow_temp = flow_func(1)
+        for i in range(len(flow_temp)):
+            flow_inds[-1-i] = flow_inds[-1-i] + (np.round(flow_temp[i])*wh).astype(int)
+
+#   And flow backwards vector
+    wh = structure_offsets[0] == -1
+    if np.any(wh):
+        flow_temp = flow_func(-1)
+        for i in range(len(flow_temp)):
+            flow_inds[-1-i][wh.squeeze()] += np.round(flow_temp[i])
+
+    del flow_temp
+
+    ravelled_index = np.ravel_multi_index([fi%data.shape[i] for i, fi in enumerate(flow_inds)],
                                           data.shape).ravel()
 
     if function is None:
+        if debug:
+            print('No function')
         if wrap:
+            if debug:
+                print('Wrapping out of bound indexes')
             return (data.ravel()[ravelled_index].reshape((n_elements,)+data.shape) * structure_factor).astype(dtype)
         else:
-            mask = np.logical_or((shape_ranges[0]+structure_offsets[0])%data.shape[0]
-                                  != (shape_ranges[0]+structure_offsets[0]),
-                                 np.any([fi%data.shape[i+1] != fi for i, fi in enumerate(flow_inds[::-1])], axis=0))
+            if debug:
+                print('Masking out of bound indexes')
+            mask = np.logical_or(flow_inds[0]%data.shape[0] != flow_inds[0],
+                                 np.any([fi%data.shape[i+1] != fi for i, fi in enumerate(flow_inds[1:])], axis=0))
             return ma.array(data.ravel()[ravelled_index].reshape((n_elements,)+data.shape) * structure_factor,
                             mask=mask, dtype=dtype)
     else:
+        if debug:
+            print('Function:', function)
         if wrap:
+            if debug:
+                print('Wrapping out of bound indexes')
             return (function(data.ravel()[ravelled_index].reshape((n_elements,)+data.shape) * structure_factor,
                             0, **kwargs)).astype(dtype)
         else:
-            mask = np.logical_or((shape_ranges[0]+structure_offsets[0])%data.shape[0]
-                                  != (shape_ranges[0]+structure_offsets[0]),
-                                 np.any([fi%data.shape[i+1] != fi for i, fi in enumerate(flow_inds[::-1])], axis=0))
+            if debug:
+                print('Masking out of bound indexes')
+            mask = np.logical_or(flow_inds[0]%data.shape[0] != flow_inds[0],
+                                 np.any([fi%data.shape[i+1] != fi for i, fi in enumerate(flow_inds[1:])], axis=0))
             return function(ma.array(data.ravel()[ravelled_index].reshape((n_elements,)+data.shape) * structure_factor,
                             mask=mask, dtype=dtype), 0, **kwargs)
+
+def flow_argmin_nearest(data, argmin, flow_func, structure=None, dtype=None):
+    """
+    A function to find the locations at the provided by an argmin of the convolved field using nearest
+    neighbour method
+    Input:
+        data:
+            An n-dimensional array or array-like input of values to perform the convolution on
+        argmin:
+            An n-dimensional array or array-like input of values of the argmin of the convolution of the
+            field.
+        flow_func:
+            A lambda function that returns the flow vectors of the data field in n-1 dimensions
+
+    Output:
+        convolve_data:
+            An output array of convoluted data. If not function keyword is provided, this will be an n+1
+            dimension array, where the leading dimension is the same length as the number of non-zero values
+            in the provided structure, and the remaining dimensions of the same size as the data input.
+            If the function keyword is defined, this will be an array of the same shape as the input data
+
+    Optional:
+        structure:
+            An array-like structure to apply to the convolution. By default this is set to square connectivity.
+            This must have n or fewer dimensions, and each dimension length must be 3 or 1. The value of the
+            convolution output will be multiplied by the correspinding structure values.
+        dtype:
+            Data type of the returned array. Defaults to the dtype of the input data
+    """
+    if dtype == None:
+        dtype = data.dtype
+    n_dims = len(data.shape)
+    assert(n_dims > 1)
+
+    if structure is None:
+        structure = ndi.generate_binary_structure(n_dims,1)
+    if hasattr(structure, "shape"):
+        if len(structure.shape) > n_dims:
+            raise ValueError("Input structure has too many dimensions")
+        for s in structure.shape:
+            if s not in [1,3]:
+                raise ValueError("structure input must be an array with dimensions of length 1 or 3")
+        if len(structure.shape) < n_dims:
+            nd_diff = n_dims - len(structure.shape)
+            structure = structure.reshape((1,)*nd_diff+structure.shape)
+    else:
+        raise ValueError("""structure input must be an array-like object""")
+
+    argmin_offsets = [wh[argmin]-1 for wh in np.where(structure!=0)]
+
+    argmin_offsets = [argmin_offsets[0]]+[np.round(arr).astype(int)+argmin_offsets[i+1]
+                        for i, arr in enumerate(flow_func(argmin_offsets[0])[::-1])]
+
+    argmin_offsets = [argmin_offsets[i]+np.arange(s).reshape(np.roll((-1,)+(1,)*(len(data.shape)-1), i))
+                        for i, s in enumerate(data.shape)]
+
+    ravelled_offsets = np.ravel_multi_index([argmin_offsets[i]%s for i, s in enumerate(data.shape)], data.shape).ravel()
+
+    return data.ravel()[ravelled_offsets].reshape(data.shape).astype(dtype)
 
 def flow_local_min(flow_stack, structure=None, ignore_nan=False):
     if structure is not None:
@@ -529,7 +630,7 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
     #
     # Now using the more efficient flow_convolve_nearest function:
     min_convolve = flow_convolve_nearest(field, flow_func,
-                                         structure=structure, function=np.nanargmin,
+                                         structure=structure, function=ma.argmin,
                                          dtype=np.uint8)
     min_convolve = np.minimum(np.maximum(min_convolve, 0), np.sum(structure!=0).astype(np.uint8)-1)
     # inds_convolve = flow_convolve(ind_stack, structure=structure)
@@ -553,19 +654,27 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
     #                                    structure=structure, function=min_inds_func,
     #                                    dtype=inds_dtype)
 
-    inds_neighbour = flow_convolve_nearest(inds, flow_func,
-                                           structure=structure,
-                                           dtype=inds_dtype)[tuple([min_convolve]
-                                                                    + np.meshgrid(*(np.arange(s, dtype=inds_dtype)
-                                                                                    for s in inds.shape[1:]),
-                                                                    indexing='ij'))]
+    # inds_neighbour = flow_convolve_nearest(inds, flow_func,
+    #                                        structure=structure,
+    #                                        dtype=inds_dtype)[tuple([min_convolve]
+    #                                                                 + np.meshgrid(*(np.arange(s, dtype=inds_dtype)
+    #                                                                                 for s in inds.shape[1:]),
+    #                                                                 indexing='ij'))]
+    inds_neighbour = flow_argmin_nearest(inds, min_convolve, flow_func,
+                                         structure=structure,
+                                         dtype=inds_dtype)
     del min_convolve
     # inds_neighbour = inds_convolve[tuple([min_convolve.data.astype(int)]+np.meshgrid(*(range(s) for s in inds.shape), indexing='ij'))].astype(int)
-    wh = np.logical_or(np.logical_or(inds_neighbour.data<0, inds_neighbour.data>inds.max()), inds_neighbour.mask)
-    if np.any(wh):
-        inds_neighbour.data[wh] = inds[wh]
+    if hasattr(inds_neighbour, "mask"):
+        wh = np.logical_or(np.logical_or(inds_neighbour.data<0, inds_neighbour.data>inds.max()), inds_neighbour.mask)
+        if np.any(wh):
+            inds_neighbour.data[wh] = inds[wh]
+    else:
+        wh = np.logical_or(inds_neighbour<0, inds_neighbour>inds.max())
+        if np.any(wh):
+            inds_neighbour[wh] = inds[wh]
     # inds_neighbour.fill_value=0
-    inds_neighbour = inds_neighbour.data.astype(inds_dtype)
+    inds_neighbour = inds_neighbour.astype(inds_dtype)
     # Now iterate over neighbour network to find minimum convergence point for each pixel
         # Each pixel will either reach a minimum or loop back to itself
     # type_converge = np.zeros(inds_neighbour.shape, np.uint8)
@@ -689,11 +798,12 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
         field_convolve = flow_convolve_nearest(field, flow_func, structure=new_struct, dtype=np.float32)
         fill_convolve = flow_convolve_nearest(fill, flow_func, structure=new_struct)
         field_convolve.mask = np.logical_or(field_convolve.mask, fill_convolve==fill)
+        del fill_convolve
 
         min_edge = np.nanmin(field_convolve, 0)
-        argmin_edge = np.nanargmin(field_convolve, 0, dtype=inds_dtype)
+        argmin_edge = np.nanargmin(field_convolve, 0).astype(inds_dtype)
 
-        del fill_convolve, field_convolve
+        del field_convolve
         # Note that we can call nanargmin directly the second time, as the mask changes have already been made by the temporary function
         # Function to find the offset of the minimum neighbour with a different label
         # def argmin_edge_func(temp, axis, counter=[0]):
@@ -735,12 +845,16 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
         #                               structure=new_struct, function=min_inds_func,
         #                               dtype=inds_dtype)
 
-        inds_neighbour = flow_convolve_nearest(inds, flow_func,
-                                               structure=structure,
-                                               dtype=inds_dtype)[tuple([argmin_edge]
-                                                                        + np.meshgrid(*(np.arange(s, dtype=inds_dtype)
-                                                                                        for s in inds.shape[1:]),
-                                                                        indexing='ij'))]
+        # inds_neighbour = flow_convolve_nearest(inds, flow_func,
+        #                                        structure=structure,
+        #                                        dtype=inds_dtype)[tuple([argmin_edge]
+        #                                                                 + np.meshgrid(*(np.arange(s, dtype=inds_dtype)
+        #                                                                                 for s in inds.shape[1:]),
+        #                                                                 indexing='ij'))]
+
+        inds_neighbour = flow_argmin_nearest(inds, argmin_edge, flow_func,
+                                             structure=structure,
+                                             dtype=inds_dtype)
 
         # inds_edge = inds_convolve[tuple([argmin_edge.data.astype(int)]+np.meshgrid(*(range(s) for s in inds.shape), indexing='ij'))].astype(int)
         # Old, slow method
