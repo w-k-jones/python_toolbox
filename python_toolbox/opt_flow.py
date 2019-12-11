@@ -78,11 +78,11 @@ class Flow_Func(object):
         self.flow_y_back = flow_y_back
 
     def __getitem__(self, items):
-        return Flow_Func(flow_x_for[items], flow_x_back[items], flow_y_for[items], flow_y_back[items])
+        return Flow_Func(self.flow_x_for[items], self.flow_x_back[items], self.flow_y_for[items], self.flow_y_back[items])
 
     def __call__(self, t):
-        return (0.5*t*(t+1)*flow_x_for + 0.5*t*(t-1)*flow_x_back,
-                0.5*t*(t+1)*flow_y_for + 0.5*t*(t-1)*flow_y_back)
+        return (0.5*t*(t+1)*self.flow_x_for + 0.5*t*(t-1)*self.flow_x_back,
+                0.5*t*(t+1)*self.flow_y_for + 0.5*t*(t-1)*self.flow_y_back)
 
 def get_flow_func(field, replace_missing=False, **kwargs):
     flow_forward = get_ds_flow(field, **kwargs)
