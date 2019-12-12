@@ -78,9 +78,15 @@ class Flow_Func(object):
         self.flow_y_back = flow_y_back
 
     def __getitem__(self, items):
+        """
+        return a subset of the flow vectors
+        """
         return Flow_Func(self.flow_x_for[items], self.flow_x_back[items], self.flow_y_for[items], self.flow_y_back[items])
 
     def __call__(self, t):
+        """
+        parabolic interpolation of the flow vectors
+        """
         return (0.5*t*(t+1)*self.flow_x_for + 0.5*t*(t-1)*self.flow_x_back,
                 0.5*t*(t+1)*self.flow_y_for + 0.5*t*(t-1)*self.flow_y_back)
 
@@ -198,6 +204,23 @@ def flow_convolve(flow_data, structure=None, wrap=False, function=None, dtype=No
             output[:,i] = temp
     return output
 
+def _checkstruct(structure, n_dims):
+    if structure is None:
+        structure = ndi.generate_binary_structure(n_dims,1)
+    if hasattr(structure, "shape"):
+        if len(structure.shape) > n_dims:
+            raise ValueError("Input structure has too many dimensions")
+        for s in structure.shape:
+            if s not in [1,3]:
+                raise ValueError("structure input must be an array with dimensions of length 1 or 3")
+        if len(structure.shape) < n_dims:
+            nd_diff = n_dims - len(structure.shape)
+            structure = structure.reshape((1,)*nd_diff+structure.shape)
+    else:
+        raise ValueError("""structure input must be an array-like object""")
+
+    return structure
+
 def flow_convolve_nearest(data, flow_func, structure=None, wrap=False, function=None, dtype=None, debug=False, **kwargs):
     """
     A function to compute a Semi-Lagrangian convolution using the nearest neighbour method. This can be performed
@@ -236,83 +259,57 @@ def flow_convolve_nearest(data, flow_func, structure=None, wrap=False, function=
     n_dims = len(data.shape)
     assert(n_dims > 1)
 
-    if structure is None:
-        structure = ndi.generate_binary_structure(n_dims,1)
-    if hasattr(structure, "shape"):
-        if len(structure.shape) > n_dims:
-            raise ValueError("Input structure has too many dimensions")
-        for s in structure.shape:
-            if s not in [1,3]:
-                raise ValueError("structure input must be an array with dimensions of length 1 or 3")
-        if len(structure.shape) < n_dims:
-            nd_diff = n_dims - len(structure.shape)
-            structure = structure.reshape((1,)*nd_diff+structure.shape)
-    else:
-        raise ValueError("""structure input must be an array-like object""")
+    structure = _checkstruct(structure, n_dims)
 
-    structure_offsets = [arr.reshape((-1,)+(1,)*len(data.shape))-1 for arr in np.where(structure!=0)]
+    structure_offsets = [arr.reshape((-1,)+(1,)*(n_dims-1))-1 for arr in np.where(structure!=0)]
+    whp1 = (structure_offsets[0] == 1)
+    whm1 = (structure_offsets[0] == -1)
 
-    structure_factor = structure[structure!=0].reshape((-1,)+(1,)*len(data.shape))
+    structure_factor = structure[structure!=0].reshape((-1,)+(1,)*(n_dims-1))
 
     n_elements = np.sum(structure!=0)
 
-    shape_ranges = [np.arange(s).reshape(np.roll((-1,)+(1,)*(len(data.shape)-1), i))
-                    for i, s in enumerate(data.shape)]
+    shape_ranges = [np.arange(s).reshape(np.roll((-1,)+(1,)*(n_dims-2), i))
+                    for i, s in enumerate(data.shape[1:])]
 
-    flow_inds = [shape_ranges[i] + structure_offsets[i] for i in range(n_dims)]
-
-#   Now add flow forwards vector
-    wh = structure_offsets[0] == 1
-    if np.any(wh):
-        flow_temp = flow_func(1)
-        for i in range(len(flow_temp)):
-            flow_inds[-1-i] = flow_inds[-1-i] + (np.round(flow_temp[i])*wh).astype(int)
-
-#   And flow backwards vector
-    wh = structure_offsets[0] == -1
-    if np.any(wh):
-        flow_temp = flow_func(-1)
-        for i in range(len(flow_temp)):
-            flow_inds[-1-i][wh.squeeze()] += np.round(flow_temp[i])
-
-    del flow_temp
-
-    ravelled_index = np.ravel_multi_index([fi%data.shape[i] for i, fi in enumerate(flow_inds)],
-                                          data.shape).ravel()
+    flow_inds = [shape_ranges[i] + structure_offsets[i+1] for i in range(n_dims-1)]
 
     if function is None:
-        if debug:
-            print('No function')
-        if wrap:
-            if debug:
-                print('Wrapping out of bound indexes')
-            return (data.ravel()[ravelled_index].reshape((n_elements,)+data.shape) * structure_factor).astype(dtype)
-        else:
-            if debug:
-                print('Masking out of bound indexes')
-            mask = np.logical_or(flow_inds[0]%data.shape[0] != flow_inds[0],
-                                 np.any([fi%data.shape[i+1] != fi for i, fi in enumerate(flow_inds[1:])], axis=0))
-            return ma.array(data.ravel()[ravelled_index].reshape((n_elements,)+data.shape) * structure_factor,
-                            mask=mask, dtype=dtype)
+        out_arr = ma.empty((n_elements,)+data.shape, dtype=dtype)
     else:
-        if debug:
-            print('Function:', function)
+        out_arr = ma.empty(data.shape, dtype=dtype)
+
+    for t in range(data.shape[0]):
+        # Todo: make this generalised for more dimensions
+        temp_inds = [None, None]
+        temp_inds[0] = (flow_inds[0] + np.round(flow_func.flow_y_for[t]).astype(int)*whp1
+                                     + np.round(flow_func.flow_y_back[t]).astype(int)*whm1)
+        temp_inds[1] = (flow_inds[1] + np.round(flow_func.flow_x_for[t]).astype(int)*whp1
+                                     + np.round(flow_func.flow_x_back[t]).astype(int)*whm1)
+
+        ravelled_index = np.ravel_multi_index([(structure_offsets[0]+t)%data.shape[0],
+                                               temp_inds[0]%data.shape[1],
+                                               temp_inds[1]%data.shape[2]],
+                                              data.shape).ravel()
         if wrap:
-            if debug:
-                print('Wrapping out of bound indexes')
-            return (function(data.ravel()[ravelled_index].reshape((n_elements,)+data.shape) * structure_factor,
-                            0, **kwargs)).astype(dtype)
+            mask = False
         else:
-            if debug:
-                print('Masking out of bound indexes')
-            mask = np.logical_or(flow_inds[0]%data.shape[0] != flow_inds[0],
-                                 np.any([fi%data.shape[i+1] != fi for i, fi in enumerate(flow_inds[1:])], axis=0))
-            return function(ma.array(data.ravel()[ravelled_index].reshape((n_elements,)+data.shape) * structure_factor,
-                            mask=mask, dtype=dtype), 0, **kwargs)
+            mask = sum([(structure_offsets[0]+t)%data.shape[0] != (structure_offsets[0]+t),
+                        (temp_inds[0]%data.shape[1]) != temp_inds[0],
+                        (temp_inds[1]%data.shape[2]) != temp_inds[1]])
+
+        temp = ma.array(data.ravel()[ravelled_index].reshape((n_elements,)+data.shape[1:]) * structure_factor,
+                        mask=mask, dtype=data.dtype)
+        if function is None:
+            out_arr[:,t] = temp
+        else:
+            out_arr[t] = function(temp, 0, **kwargs)
+
+    return out_arr
 
 def flow_argmin_nearest(data, argmin, flow_func, structure=None, dtype=None):
     """
-    A function to find the locations at the provided by an argmin of the convolved field using nearest
+    A function to find the data at the locations provided by an argmin of the convolved field using nearest
     neighbour method
     Input:
         data:
@@ -343,31 +340,34 @@ def flow_argmin_nearest(data, argmin, flow_func, structure=None, dtype=None):
     n_dims = len(data.shape)
     assert(n_dims > 1)
 
-    if structure is None:
-        structure = ndi.generate_binary_structure(n_dims,1)
-    if hasattr(structure, "shape"):
-        if len(structure.shape) > n_dims:
-            raise ValueError("Input structure has too many dimensions")
-        for s in structure.shape:
-            if s not in [1,3]:
-                raise ValueError("structure input must be an array with dimensions of length 1 or 3")
-        if len(structure.shape) < n_dims:
-            nd_diff = n_dims - len(structure.shape)
-            structure = structure.reshape((1,)*nd_diff+structure.shape)
-    else:
-        raise ValueError("""structure input must be an array-like object""")
+    structure = _checkstruct(structure, n_dims)
 
-    argmin_offsets = [wh[argmin]-1 for wh in np.where(structure!=0)]
+    shape_arrays = np.meshgrid(*(np.arange(s, dtype=int) for s in argmin.shape[1:]), indexing='ij')
 
-    argmin_offsets = [argmin_offsets[0]]+[np.round(arr).astype(int)+argmin_offsets[i+1]
-                        for i, arr in enumerate(flow_func(argmin_offsets[0])[::-1])]
+    out_arr = np.empty(argmin.shape, dtype=dtype)
 
-    argmin_offsets = [argmin_offsets[i]+np.arange(s).reshape(np.roll((-1,)+(1,)*(len(data.shape)-1), i))
-                        for i, s in enumerate(data.shape)]
+    for t in range(argmin.shape[0]):
+        argmin_offsets = [wh[argmin[t]]-1 for wh in np.where(structure!=0)]
 
-    ravelled_offsets = np.ravel_multi_index([argmin_offsets[i]%s for i, s in enumerate(data.shape)], data.shape).ravel()
+        whp1 = (argmin_offsets[0] == 1)
+        whm1 = (argmin_offsets[0] == -1)
 
-    return data.ravel()[ravelled_offsets].reshape(data.shape).astype(dtype)
+        argmin_offsets[0] += t
+        argmin_offsets[1] += (np.round(flow_func.flow_y_for[t]).astype(int)*whp1
+                              + np.round(flow_func.flow_y_back[t]).astype(int)*whm1
+                              + shape_arrays[0])
+        argmin_offsets[2] += (np.round(flow_func.flow_x_for[t]).astype(int)*whp1
+                              + np.round(flow_func.flow_x_back[t]).astype(int)*whm1
+                              + shape_arrays[1])
+
+        ravelled_index = np.ravel_multi_index([argmin_offsets[0]%data.shape[0],
+                                               argmin_offsets[1]%data.shape[1],
+                                               argmin_offsets[2]%data.shape[2]],
+                                               data.shape).ravel()
+
+        out_arr[t] = data.ravel()[ravelled_index].reshape(out_arr.shape[1:])
+
+    return out_arr
 
 def flow_local_min(flow_stack, structure=None, ignore_nan=False):
     if structure is not None:
@@ -884,17 +884,17 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
             try:
                 output = fill.ravel()[inds_edge.ravel()[wh][np.nanargmin(np.maximum(min_edge.ravel()[wh], field.ravel()[wh]))]]
             except:
-                return 0
+                raise ValueError("Failed to get output label")
             # Now need to check if output is masked
             if (type(output) is ma.MaskedArray and output.mask):
-                return 0
+                raise ValueError("Output label is masked!")
             else:
                 output = output.item()
             # and check if nan
             if np.all(np.isfinite(output)):
                 return output
             else:
-                return 0
+                raise ValueError("Output label is not finite!")
         new_label = ma.array([get_new_label(k) for k in range(n_bins)]).astype(int)
         new_label.fill_value=0
         new_label=new_label.filled()
