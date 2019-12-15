@@ -35,3 +35,6 @@ thermodynamics:
   
 tracking_tools:
   In development tools for detection and tracking of deep convection. To be included in future versions of tobac
+  
+opt_flow:
+  A library of tools for analysing geostationary satellite data from a Semi-Lagrangian perspective using optical flow techniques to provide motion tracking. At some point this will be split off into a separate project.
