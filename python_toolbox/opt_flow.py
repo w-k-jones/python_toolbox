@@ -770,7 +770,7 @@ def flow_network_watershed(field, markers, flow_func, mask=None, structure=None,
             else:
                 raise ValueError("Output label is not finite!")
         new_label = ma.array(list(range(max_markers+1))
-                             + [get_new_label(k) for k in range(max_markers+1, n_bins)],
+                             + [get_new_label(k) if region_bins[k] > 0 else 0 for k in range(max_markers+1, n_bins)],
                              dtype=mark_dtype)
         new_label.fill_value=0
         new_label=new_label.filled()
