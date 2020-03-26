@@ -82,7 +82,8 @@ class Flow_Func(object):
         """
         return a subset of the flow vectors
         """
-        return Flow_Func(self.flow_x_for[items], self.flow_x_back[items], self.flow_y_for[items], self.flow_y_back[items])
+        return Flow_Func(self.flow_x_for[items], self.flow_x_back[items],
+                         self.flow_y_for[items], self.flow_y_back[items])
 
     def __call__(self, t):
         """
@@ -92,16 +93,18 @@ class Flow_Func(object):
                 0.5*t*(t+1)*self.flow_y_for + 0.5*t*(t-1)*self.flow_y_back)
 
 
-def get_flow_func(field, replace_missing=False, **kwargs):
+def get_flow_func(field, replace_missing=False, post_iter=0, **kwargs):
     flow_forward = get_ds_flow(field, **kwargs)
     flow_backward = get_ds_flow(field, direction='backwards', **kwargs)
     if replace_missing:
         flow_forward[0][-1], flow_forward[1][-1] = -flow_backward[0][-1], -flow_backward[1][-1]
         flow_backward[0][0], flow_backward[1][0] = -flow_forward[0][0], -flow_forward[1][0]
-        wh = np.logical_or(np.isnan(flow_forward[0]), np.isnan(flow_forward[1]))
+        wh = np.logical_or(np.isnan(flow_forward[0]),
+                           np.isnan(flow_forward[1]))
         if np.any(wh):
             flow_forward[wh] = 0
-        wh = np.logical_or(np.isnan(flow_backward[0]), np.isnan(flow_backward[1]))
+        wh = np.logical_or(np.isnan(flow_backward[0]),
+                           np.isnan(flow_backward[1]))
         if np.any(wh):
             flow_backward[wh] = 0
 
@@ -109,13 +112,43 @@ def get_flow_func(field, replace_missing=False, **kwargs):
     flow_y_for = flow_forward[1].to_masked_array()
     flow_x_back = flow_backward[0].to_masked_array()
     flow_y_back = flow_backward[1].to_masked_array()
-    return Flow_Func(flow_x_for, flow_x_back, flow_y_for, flow_y_back)
+
+    flow_func = Flow_Func(flow_x_for, flow_x_back, flow_y_for, flow_y_back)
+
+    # Check that the forward and backward vectors for between two frames are
+    # equal and opposite
+    if post_iter > 0:
+        for i in range(post_iter):
+            x_for_interp = -interp_ds_flow(
+                xr.DataArray(flow_func.flow_x_back, dims=('t','y','x')),
+                *flow_func(1), method='linear').data
+            y_for_interp = -interp_ds_flow(
+                xr.DataArray(flow_func.flow_y_back, dims=('t','y','x')),
+                *flow_func(1), method='linear').data
+            x_back_interp = -interp_ds_flow(
+                xr.DataArray(flow_func.flow_x_for, dims=('t','y','x')),
+                *flow_func(-1), direction='backwards', method='linear').data
+            y_back_interp = -interp_ds_flow(
+                xr.DataArray(flow_func.flow_y_for, dims=('t','y','x')),
+                *flow_func(-1), direction='backwards', method='linear').data
+            flow_func.flow_x_for[1:-1] = (flow_func.flow_x_for[1:-1]
+                                          + x_for_interp[1:-1]) / 2
+            flow_func.flow_y_for[1:-1] = (flow_func.flow_y_for[1:-1]
+                                          + y_for_interp[1:-1]) / 2
+            flow_func.flow_x_back[1:-1] = (flow_func.flow_x_back[1:-1]
+                                           + x_back_interp[1:-1]) / 2
+            flow_func.flow_y_back[1:-1] = (flow_func.flow_y_back[1:-1]
+                                           + y_back_interp[1:-1]) / 2
+
+    return flow_func
 
 def interp_flow(da, flow, method='linear'):
-    x = np.arange(da.coords['x'].size)
-    y = np.arange(da.coords['y'].size)
+    x = np.arange(da.shape[-1])
+    y = np.arange(da.shape[-2])
     xx, yy = np.meshgrid(x, y)
     new_xx, new_yy = xx + flow[...,0], yy + flow[...,1]
+    new_xx = np.minimum(np.maximum(new_xx, 0), x.max())
+    new_yy = np.minimum(np.maximum(new_yy, 0), y.max())
     interp_da = xr.apply_ufunc(interpolate.interpn, (y, x), da, (new_yy, new_xx), kwargs={'method':method, 'bounds_error':False, 'fill_value':None})
     return interp_da
 
@@ -138,6 +171,26 @@ def get_flow_stack(field, flow_func, method='linear'):
                       field,
                       interp_ds_flow(field, *flow_func(1), method=method)],
                      dim='t_off')
+
+def test_flow(field, plot=True, return_flow=False, **flow_kwargs):
+    field_flow = get_flow_func(field, **flow_kwargs)
+    field_stack = get_flow_stack(field, field_flow).data
+    residual_mag = np.zeros(field.shape)
+    for i in range(field.shape[0]):
+        residual_flow = get_flow_func(xr.DataArray(field_stack[1:,i],dims=('t','y','x')),
+                                               **flow_kwargs)
+        residual_mag[i] = 0.5 * ((residual_flow.flow_x_for[0]**2 + residual_flow.flow_y_for[0]**2)**0.5
+                                 + (residual_flow.flow_x_back[0]**2 + residual_flow.flow_y_back[0]**2)**0.5)
+
+    flow_mag = 0.5 * ((field_flow.flow_x_for**2 + field_flow.flow_y_for**2)**0.5
+                      + (field_flow.flow_x_back**2 + field_flow.flow_y_back**2)**0.5)
+
+    residual_mag = ma.array(residual_mag, mask=flow_mag.mask)/2**0.5
+    relative_mag = residual_mag/flow_mag
+    if return_flow:
+        return residual_mag, relative_mag, field_flow
+    else:
+        return residual_mag, relative_mag
 
 def flow_convolve(flow_data, structure=None, wrap=False, function=None, dtype=None, **kwargs):
     if dtype == None:
@@ -183,25 +236,28 @@ def flow_convolve(flow_data, structure=None, wrap=False, function=None, dtype=No
     if not wrap:
         offset_mask = np.any([offset_inds[i]!=offset_inds_corrected[i] for i in range(len(offset_inds))],0)
     offset_inds_corrected = tuple(offset_inds_corrected)
+    inds_shape = offset_inds_corrected[0].shape
+    offset_inds_corrected = np.ravel_multi_index(offset_inds_corrected, inds_shape).ravel()
+
     if function is not None:
         if hasattr(function, '__iter__'):
             n_func = len(function)
             output = ma.empty((n_func,)+flow_data.shape[1:], dtype)
             for i in range(flow_data.shape[1]):
-                temp = ma.array(flow_data[:,i][offset_inds_corrected])*multi_struct
+                temp = ma.array(flow_data.transpose([1,0,2,3])[i].ravel()[offset_inds_corrected]).reshape(inds_shape) * multi_struct
                 temp.mask = np.logical_or(np.isnan(temp), offset_mask)
                 for j in range(n_func):
                     output[j,i] = function[j](temp, 0, **kwargs)
         else:
             output = ma.empty(flow_data.shape[1:], dtype)
             for i in range(flow_data.shape[1]):
-                temp = ma.array(flow_data[:,i][offset_inds_corrected])*multi_struct
+                temp = ma.array(flow_data.transpose([1,0,2,3])[i].ravel()[offset_inds_corrected]).reshape(inds_shape) * multi_struct
                 temp.mask = np.logical_or(np.isnan(temp), offset_mask)
                 output[i] = function(temp, 0, **kwargs)
     else:
         output = ma.empty((n_struct,)+flow_data.shape[1:], dtype)
         for i in range(flow_data.shape[1]):
-            temp = ma.array(flow_data[:,i][offset_inds_corrected])*multi_struct
+            temp = ma.array(flow_data.transpose([1,0,2,3])[i].ravel()[offset_inds_corrected]).reshape(inds_shape) * multi_struct
             temp.mask = np.logical_or(np.isnan(temp), offset_mask)
             output[:,i] = temp
     return output

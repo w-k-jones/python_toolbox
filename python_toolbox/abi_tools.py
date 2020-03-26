@@ -34,7 +34,6 @@ def get_abi_basemap(ds):
     h = ds.goes_imager_projection.perspective_point_height
     X = ds.x*h
     Y = ds.y*h
-    lats, lons = get_abi_lat_lon(ds)
     basemap = Basemap(projection='geos', lon_0=lon_0, area_thresh=5000, resolution='i',
                       llcrnrx=np.nanmin(X), llcrnry=np.nanmin(Y),
                       urcrnrx=np.nanmax(X), urcrnry=np.nanmax(Y),
@@ -134,9 +133,9 @@ def get_abi_IR(dataset, check=False, dtype=None):
     else:
         return bt.astype(dtype)
 
-def get_abi_ds_from_files(filenames, check=False, dtype=None):
+def get_abi_ds_from_files(filenames, check=False, dtype=None, slices={}, **kwargs):
     if type(filenames) is str:
-        with xr.open_dataset(filenames) as ds:
+        with xr.open_dataset(filenames, **kwargs).isel(**slices) as ds:
             channel = ds.band_id.data[0]
             wavelength = ds.band_wavelength.data[0]
             if channel<7:
@@ -144,7 +143,7 @@ def get_abi_ds_from_files(filenames, check=False, dtype=None):
             else:
                 DataArray = get_abi_IR(ds, dtype=dtype)
     elif hasattr(filenames, '__iter__'):
-        with xr.open_mfdataset(filenames, combine='nested', concat_dim='t') as ds:
+        with xr.open_mfdataset(filenames, combine='nested', concat_dim='t', **kwargs).isel(**slices) as ds:
             channel = ds.band_id.data[0]
             wavelength = ds.band_wavelength.data[0]
             if channel<7:
@@ -218,7 +217,7 @@ def _contrast_correction(color, contrast):
     return COLOR
 
 def get_abi_rgb(C01_ds, C02_ds, C03_ds, IR_ds=None, gamma=0.4, contrast=75, l=1):
-    if IR_ds != None:
+    if IR_ds is not None:
         l = l*2
     l = int(l)
     R = ds_area_func(np.mean, C02_ds, l*2, dims=('x','y'), chop=True)
@@ -263,15 +262,15 @@ def get_abi_rgb(C01_ds, C02_ds, C03_ds, IR_ds=None, gamma=0.4, contrast=75, l=1)
 
 def get_abi_RGB_from_files(C01_file, C02_file, C03_file, IR_file=None, gamma=0.4, contrast=75, l=1):
     if IR_file != None:
-        RGB = get_abi_rgb(get_abi_ds_from_files(C01_ds),
-                          get_abi_ds_from_files(C02_ds),
-                          get_abi_ds_from_files(C03_ds),
-                          IR_ds=get_abi_ds_from_files(IR_ds),
+        RGB = get_abi_rgb(get_abi_ds_from_files(C01_file),
+                          get_abi_ds_from_files(C02_file),
+                          get_abi_ds_from_files(C03_file),
+                          IR_ds=get_abi_ds_from_files(IR_file),
                           gamma=gamma, contrast=contrast, l=l)
     else:
-        RGB = get_abi_rgb(get_abi_ds_from_files(C01_ds),
-                          get_abi_ds_from_files(C02_ds),
-                          get_abi_ds_from_files(C03_ds),
+        RGB = get_abi_rgb(get_abi_ds_from_files(C01_file),
+                          get_abi_ds_from_files(C02_file),
+                          get_abi_ds_from_files(C03_file),
                           gamma=gamma, contrast=contrast, l=l)
     return RGB
 
