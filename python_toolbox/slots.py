@@ -8,6 +8,13 @@ import dask.array as da
 from python_toolbox import opt_flow
 
 def _to_8bit(array, vmin=None, vmax=None):
+    """
+    Rescales an array and converts to byte values
+    By default the rescaling is done between the largest and smallest values in
+    the array in order to maintain maximum bit definition. Optionally, the
+    minimum and maximum values can be provided by the 'vmin' and 'vmax' keywords
+    in order to rescale the array over a fixed range of values
+    """
     if vmin is None:
         vmin = np.nanmin(array)
     if vmax is None:
@@ -17,6 +24,12 @@ def _to_8bit(array, vmin=None, vmax=None):
 
 def _cv_flow(a, b, pyr_scale=0.5, levels=5, winsize=16, iterations=4,
              poly_n=5, poly_sigma=1.1, flags=cv.OPTFLOW_FARNEBACK_GAUSSIAN):
+    """
+    Wrapper function for cv.calcOpticalFlowFarneback. This turns the argument
+    parameters into keywords with default values provided, and returns the flow
+    as a tuple of n-dimensional arrays for the x- and y-flow components, rather
+    than a single n+1-dimensional array
+    """
     flow = cv.calcOpticalFlowFarneback(_to_8bit(a), _to_8bit(b), None,
                                        pyr_scale, levels, winsize, iterations,
                                        poly_n, poly_sigma, flags)
@@ -25,13 +38,23 @@ def _cv_flow(a, b, pyr_scale=0.5, levels=5, winsize=16, iterations=4,
 def dask_flow(a, b, pyr_scale=0.5, levels=5, winsize=16, iterations=4,
               poly_n=5, poly_sigma=1.1, flags=cv.OPTFLOW_FARNEBACK_GAUSSIAN,
               dtype=float):
-    _dask_flow = da.gufunc(_cv_flow, signature='(a,b),(a,b),(),(),(),(),(),(),()->(a,b),(a,b)',
-                       output_dtypes=(dtype, dtype), vectorize=True)
-    return _dask_flow(da.asarray(a).rechunk((1,-1,-1)), da.asarray(b).rechunk((1,-1,-1)),
+    """
+    Maps _cv_flow to a dask gufunc
+    """
+    _dask_flow = da.gufunc(_cv_flow,
+                           signature='(a,b),(a,b),(),(),(),(),(),(),()->(a,b),(a,b)',
+                           output_dtypes=(dtype, dtype), vectorize=True)
+    return _dask_flow(da.asarray(a).rechunk((1,-1,-1)),
+                      da.asarray(b).rechunk((1,-1,-1)),
                       pyr_scale, levels, winsize, iterations, poly_n,
                       poly_sigma, flags)
 
 class Flow_Func(object):
+    """
+    An object to hold the flow vectors of a field. Approximates the flow as a
+    parabolic interpolation between the t+1 and t-1 flow vectors.
+    Can be called for any t value or subsetted
+    """
     def __init__(self, flow_x_for, flow_x_back, flow_y_for, flow_y_back):
         self.flow_x_for = flow_x_for
         self.flow_y_for = flow_y_for
@@ -60,9 +83,21 @@ class Flow_Func(object):
 
 def get_flow_func(field, post_iter=0, dtype=float, compute=False, **flow_kwargs):
     input_shape = field.shape
+    """
+    Calculates the flow vectors of a 3-dimensional field (time, x, y) using
+    cv.calcOpticalFlowFarneback and returns a Flow_Func object of corresponding
+    shape.
+    By default the field will be returned as dask arrays. To explicitly compute
+    these set the 'compute' keyword to True
+    The 'post_iter' keyword sets the number of iterations of correction on the
+    resulting vectors by comparing the forwards and backwards flow vectors of
+    subsequent time periods.
+    """
 
-    flow_x_for, flow_y_for = dask_flow(field[:-1], field[1:], dtype=dtype, **flow_kwargs)
-    flow_x_back, flow_y_back = dask_flow(field[1:], field[:-1], dtype=dtype, **flow_kwargs)
+    flow_x_for, flow_y_for = dask_flow(field[:-1], field[1:], dtype=dtype,
+                                       **flow_kwargs)
+    flow_x_back, flow_y_back = dask_flow(field[1:], field[:-1], dtype=dtype,
+                                         **flow_kwargs)
 
     flow = Flow_Func(
         da.concatenate([flow_x_for, -flow_x_back[-1:]], 0),
@@ -82,10 +117,18 @@ def get_flow_func(field, post_iter=0, dtype=float, compute=False, **flow_kwargs)
     return flow
 
 def _smooth_flow(flow, dtype=float):
-    x_for_interp = -dask_interp_flow(flow.flow_x_back[1:], flow[:-1], t=1, dtype=dtype)
-    y_for_interp = -dask_interp_flow(flow.flow_y_back[1:], flow[:-1], t=1, dtype=dtype)
-    x_back_interp = -dask_interp_flow(flow.flow_x_for[:-1], flow[1:], t=-1, dtype=dtype)
-    y_back_interp = -dask_interp_flow(flow.flow_y_for[:-1], flow[1:], t=-1, dtype=dtype)
+    """
+    Corrects the flow field by comparing the forwards and backwards flow vectors
+    of subsequent time periods.
+    """
+    x_for_interp = -dask_interp_flow(flow.flow_x_back[1:], flow[:-1], t=1,
+                                     dtype=dtype)
+    y_for_interp = -dask_interp_flow(flow.flow_y_back[1:], flow[:-1], t=1,
+                                     dtype=dtype)
+    x_back_interp = -dask_interp_flow(flow.flow_x_for[:-1], flow[1:], t=-1,
+                                      dtype=dtype)
+    y_back_interp = -dask_interp_flow(flow.flow_y_for[:-1], flow[1:], t=-1,
+                                      dtype=dtype)
 
     x_for_smoothed = 0.5 * (x_for_interp + flow.flow_x_for[:-1])
     y_for_smoothed = 0.5 * (y_for_interp + flow.flow_y_for[:-1])
@@ -105,7 +148,8 @@ def _interp_flow(data, flow_x, flow_y, method='linear'):
     new_xx, new_yy = xx + flow_x, yy + flow_y
     new_xx = np.minimum(np.maximum(new_xx, 0), x.max())
     new_yy = np.minimum(np.maximum(new_yy, 0), y.max())
-    interp_da = xr.apply_ufunc(interpolate.interpn, (y, x), data, (new_yy, new_xx),
+    interp_da = xr.apply_ufunc(interpolate.interpn, (y, x), data,
+                               (new_yy, new_xx),
                                kwargs={'method':method, 'bounds_error':False,
                                        'fill_value':None})
     return interp_da
@@ -196,6 +240,86 @@ def flow_sobel(data, flow, method='linear', direction=None, magnitude=False, dty
 
     return output
 
+# def flow_sobel_new(data, flow, method='linear', direction=None, magnitude=False, dtype=float):
+#     sobel_matrix = _sobel_matrix(3)
+#     flow_stack = get_flow_stack(data, flow, method=method, dtype=dtype)
+
+def flow_label(data, flow, structure=ndi.generate_binary_structure(3,1)):
+    """
+    Labels separate regions in a Lagrangian aware manner using a pre-generated
+    flow field. Works in a similar manner to scipy.ndimage.label. By default
+    uses square connectivity
+    """
+#     Get labels for each time step
+    t_labels = ndi.label(data, structure=structure * np.array([0,1,0])[:,np.newaxis,np.newaxis])[0].astype(float)
+
+    bin_edges = np.cumsum(np.bincount(t_labels.astype(int).ravel()))
+    args = np.argsort(t_labels.ravel())
+
+    t_labels[t_labels==0] = np.nan
+    # Now get previous labels (lagrangian)
+    if np.any(structure * np.array([1,0,0])[:,np.newaxis,np.newaxis]):
+        p_labels = da.nanmin(flow_convolve(t_labels, flow,
+                             structure=structure * np.array([1,0,0])[:,np.newaxis,np.newaxis],
+                             method='nearest'), 0).compute()
+    #     Map each label to its smallest overlapping label at the previous time step
+        p_label_map = {i:int(np.nanmin(p_labels.ravel()[args[bin_edges[i-1]:bin_edges[i]]])) \
+                   if bin_edges[i-1] < bin_edges[i] \
+                       and np.any(np.isfinite(p_labels.ravel()[args[bin_edges[i-1]:bin_edges[i]]])) \
+                   else i \
+                   for i in range(1, len(bin_edges)) \
+                   }
+    #     Converge to lowest value label
+        for k in p_label_map:
+            while p_label_map[k] != p_label_map[p_label_map[k]]:
+                p_label_map[k] = p_label_map[p_label_map[k]]
+    #     Check all labels have converged
+        for k in p_label_map:
+            assert p_label_map[k] == p_label_map[p_label_map[k]]
+    #     Relabel
+        for k in p_label_map:
+            if p_label_map[k] != k and bin_edges[k-1] < bin_edges[k]:
+                t_labels.ravel()[args[bin_edges[k-1]:bin_edges[k]]] = p_label_map[k]
+    # Now get labels for the next step
+    if np.any(structure * np.array([0,0,1])[:,np.newaxis,np.newaxis]):
+        n_labels = da.nanmin(flow_convolve(t_labels, flow,
+                                structure=structure * np.array([0,0,1])[:,np.newaxis,np.newaxis],
+                                method='nearest'), 0).compute()
+    # Set matching labels to NaN to avoid repeating values
+        n_labels[n_labels==t_labels] = np.nan
+        # New bins
+        bins = np.bincount(np.fmax(t_labels.ravel(),0).astype(int))
+        bin_edges = np.cumsum(bins)
+        args = np.argsort(np.fmax(t_labels.ravel(),0).astype(int))
+    #     map each label to the smallest overlapping label at the next time step
+        n_label_map = {i:int(np.nanmin(n_labels.ravel()[args[bin_edges[i-1]:bin_edges[i]]])) \
+                   if bin_edges[i-1] < bin_edges[i] \
+                       and np.any(np.isfinite(n_labels.ravel()[args[bin_edges[i-1]:bin_edges[i]]])) \
+                   else i \
+                   for i in range(1, len(bin_edges)) \
+                   }
+    # converge
+        for k in sorted(list(n_label_map.keys()))[::-1]:
+            while n_label_map[k] != n_label_map[n_label_map[k]]:
+                n_label_map[k] = n_label_map[n_label_map[k]]
+    #     Check convergence
+        for k in n_label_map:
+            assert n_label_map[k] == n_label_map[n_label_map[k]]
+    #       Now relabel again
+        for k in n_label_map:
+            if n_label_map[k] != k and bin_edges[k-1] < bin_edges[k]:
+                t_labels.ravel()[args[bin_edges[k-1]:bin_edges[k]]] = n_label_map[k]
+# New bins
+    bins = np.bincount(np.fmax(t_labels.ravel(),0).astype(int))
+    bin_edges = np.cumsum(bins)
+    args = np.argsort(np.fmax(t_labels.ravel(),0).astype(int))
+#     relabel with consecutive integer values
+    for i, label in enumerate(np.unique(t_labels[np.isfinite(t_labels)]).astype(int)):
+        if bin_edges[label-1] < bin_edges[label]:
+            t_labels.ravel()[args[bin_edges[label-1]:bin_edges[label]]] = i+1
+    t_labels = np.fmax(t_labels,0).astype(int)
+    return t_labels
+
 def watershed(field, flow, markers,
                       mask=None,
                       structure=ndi.generate_binary_structure(3,1),
@@ -211,6 +335,11 @@ def watershed(field, flow, markers,
     else:
         inds_dtype = np.uint64
         fill_dtype = np.int64
+
+    wh = np.logical_not(np.isfinite(field))
+    if np.any(wh):
+        markers[wh] = 0
+        mask[wh] = 1
 
     inds_neighbour = opt_flow.flow_argmin_nearest(
                             np.arange(field.size, dtype=inds_dtype).reshape(field.shape),
