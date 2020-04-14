@@ -15,7 +15,7 @@ def era_interim_file_search(date, type, quiet=False):
     except:
         raise Exception('Cannot find ERA-interim directory: ' + path_to_file)
     if not quiet:
-        print 'Files found: ' + str(len(files))
+        print('Files found: ' + str(len(files)))
     return files
 
 def read_ecmwf_gafs_variable(vname,year,month,dom):
